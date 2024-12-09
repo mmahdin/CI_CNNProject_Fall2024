@@ -300,31 +300,16 @@ def initialize_three_layer_conv_part4():
 class PlainBlock(nn.Module):
     def __init__(self, Cin, Cout, downsample=False):
         super().__init__()
-
-        self.net = None
-        ############################################################################
-        # TODO: Implement PlainBlock.
-        # Hint: Wrap your layers by nn.Sequential() to output a single module.
-        #       You don't have use OrderedDict.
-        # Inputs:
-        # - Cin: number of input channels
-        # - Cout: number of output channels
-        # - downsample: add downsampling (a conv with stride=2) if True
-        # Store the result in self.net.
-        ############################################################################
-        # Replace "pass" statement with your code
         stride = 2 if downsample else 1
         self.net = nn.Sequential(
-            nn.BatchNorm2d(Cin),
-            nn.ReLU(),
-            nn.Conv2d(Cin, Cout, 3, stride=stride, padding=1),
+            nn.Conv2d(Cin, Cout, kernel_size=3,
+                      stride=stride, padding=1, bias=False),
             nn.BatchNorm2d(Cout),
-            nn.ReLU(),
-            nn.Conv2d(Cout, Cout, 3, padding=1)
+            nn.ReLU(inplace=True),
+            nn.Conv2d(Cout, Cout, kernel_size=3,
+                      stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(Cout)
         )
-        ############################################################################
-        #                                 END OF YOUR CODE                         #
-        ############################################################################
 
     def forward(self, x):
         return self.net(x)
@@ -333,124 +318,55 @@ class PlainBlock(nn.Module):
 class ResidualBlock(nn.Module):
     def __init__(self, Cin, Cout, downsample=False):
         super().__init__()
-
-        self.block = None  # F
-        self.shortcut = None  # G
-        ############################################################################
-        # TODO: Implement residual block using plain block. Hint: nn.Identity()    #
-        # Inputs:                                                                  #
-        # - Cin: number of input channels                                          #
-        # - Cout: number of output channels                                        #
-        # - downsample: add downsampling (a conv with stride=2) if True            #
-        # Store the main block in self.block and the shortcut in self.shortcut.    #
-        ############################################################################
-        # Replace "pass" statement with your code
-        if not downsample:
-            if Cin == Cout:
-                self.shortcut = nn.Sequential(
-                    nn.Identity()
-                )
-            else:
-                self.shortcut = nn.Sequential(
-                    nn.Conv2d(Cin, Cout, 1)
-                )
-        else:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(Cin, Cout, 1, stride=2)
-            )
-        self.block = PlainBlock(Cin, Cout, downsample=downsample)
-        ############################################################################
-        #                                 END OF YOUR CODE                         #
-        ############################################################################
+        stride = 2 if downsample else 1
+        self.block = PlainBlock(Cin, Cout, downsample)
+        self.shortcut = nn.Sequential(
+            nn.Conv2d(Cin, Cout, kernel_size=1, stride=stride, bias=False),
+            nn.BatchNorm2d(Cout)
+        ) if downsample or Cin != Cout else nn.Identity()
 
     def forward(self, x):
-        return self.block(x) + self.shortcut(x)
+        return F.relu(self.block(x) + self.shortcut(x))
 
 
 class ResNet(nn.Module):
     def __init__(self, stage_args, Cin=3, block=ResidualBlock, num_classes=10):
         super().__init__()
-
-        self.cnn = None
-        ############################################################################
-        # TODO: Implement the convolutional part of ResNet using ResNetStem,       #
-        #       ResNetStage, and wrap the modules by nn.Sequential.                #
-        # Store the model in self.cnn.                                             #
-        ############################################################################
-        # Replace "pass" statement with your code
-        blocks = [ResNetStem(Cin, stage_args[0][0])]
-        for arg in stage_args:
-            blocks.append(ResNetStage(*arg, block=block))
-        self.cnn = nn.Sequential(*blocks)
-        ############################################################################
-        #                                 END OF YOUR CODE                         #
-        ############################################################################
+        self.cnn = nn.Sequential(
+            ResNetStem(Cin=Cin, Cout=stage_args[0][0]),
+            *[ResNetStage(*args, block=block) for args in stage_args]
+        )
         self.fc = nn.Linear(stage_args[-1][1], num_classes)
 
     def forward(self, x):
-        scores = None
-        ############################################################################
-        # TODO: Implement the forward function of ResNet.                          #
-        # Store the output in `scores`.                                            #
-        ############################################################################
-        # Replace "pass" statement with your code
-        out = self.cnn(x)
-        pool = nn.AvgPool2d((out.shape[2], out.shape[3]))
-        out = pool(out)
-        out = flatten(out)
-        scores = self.fc(out)
-        ############################################################################
-        #                                 END OF YOUR CODE                         #
-        ############################################################################
-        return scores
+        x = self.cnn(x)
+        x = F.adaptive_avg_pool2d(x, (1, 1)).view(x.size(0), -1)
+        return self.fc(x)
 
 
 class ResidualBottleneckBlock(nn.Module):
     def __init__(self, Cin, Cout, downsample=False):
         super().__init__()
-
-        self.block = None
-        self.shortcut = None
-        ############################################################################
-        # TODO: Implement residual bottleneck block.                               #
-        # Inputs:                                                                  #
-        # - Cin: number of input channels                                          #
-        # - Cout: number of output channels                                        #
-        # - downsample: add downsampling (a conv with stride=2) if True            #
-        # Store the main block in self.block and the shortcut in self.shortcut.    #
-        ############################################################################
-        # Replace "pass" statement with your code
         stride = 2 if downsample else 1
+        mid_channels = Cout // 4
         self.block = nn.Sequential(
-            nn.BatchNorm2d(Cin),
-            nn.ReLU(),
-            nn.Conv2d(Cin, Cout//4, 1, stride=stride),
-            nn.BatchNorm2d(Cout//4),
-            nn.ReLU(),
-            nn.Conv2d(Cout//4, Cout//4, 3, padding=1),
-            nn.BatchNorm2d(Cout//4),
-            nn.ReLU(),
-            nn.Conv2d(Cout//4, Cout, 1)
+            nn.Conv2d(Cin, mid_channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, mid_channels, kernel_size=3,
+                      stride=stride, padding=1, bias=False),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, Cout, kernel_size=1, bias=False),
+            nn.BatchNorm2d(Cout)
         )
-        if not downsample:
-            if Cin == Cout:
-                self.shortcut = nn.Sequential(
-                    nn.Identity()
-                )
-            else:
-                self.shortcut = nn.Sequential(
-                    nn.Conv2d(Cin, Cout, 1)
-                )
-        else:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(Cin, Cout, 1, stride=2)
-            )
-        ############################################################################
-        #                                 END OF YOUR CODE                         #
-        ############################################################################
+        self.shortcut = nn.Sequential(
+            nn.Conv2d(Cin, Cout, kernel_size=1, stride=stride, bias=False),
+            nn.BatchNorm2d(Cout)
+        ) if downsample or Cin != Cout else nn.Identity()
 
     def forward(self, x):
-        return self.block(x) + self.shortcut(x)
+        return F.relu(self.block(x) + self.shortcut(x))
 
 ##############################################################################
 # No need to implement anything here
@@ -458,13 +374,14 @@ class ResidualBottleneckBlock(nn.Module):
 
 
 class ResNetStem(nn.Module):
-    def __init__(self, Cin=3, Cout=8):
+    def __init__(self, Cin=3, Cout=64):
         super().__init__()
-        layers = [
-            nn.Conv2d(Cin, Cout, kernel_size=3, padding=1, stride=1),
-            nn.ReLU(),
-        ]
-        self.net = nn.Sequential(*layers)
+        self.net = nn.Sequential(
+            nn.Conv2d(Cin, Cout, kernel_size=3,
+                      stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(Cout),
+            nn.ReLU(inplace=True),
+        )
 
     def forward(self, x):
         return self.net(x)
