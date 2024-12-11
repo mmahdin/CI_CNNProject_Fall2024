@@ -213,6 +213,7 @@ def train_model(model, optimizer, loader_train, loader_val,
     train_acc_history = []
     val_acc_history = []
     lr_history = []  # Track learning rates
+    train_loss_history = []
 
     for epoch in range(epochs):
         model.train()  # Set model to training mode
@@ -221,6 +222,8 @@ def train_model(model, optimizer, loader_train, loader_val,
         # Track number of correct predictions and samples for training accuracy
         num_correct = 0
         num_samples = 0
+        epoch_loss = 0.0
+        num_batches = 0
 
         for t, (x, y) in enumerate(loader_train):
             x = x.to(device=device, dtype=dtype)
@@ -239,6 +242,8 @@ def train_model(model, optimizer, loader_train, loader_val,
             _, preds = scores.max(1)
             num_correct += (preds == y).sum().item()
             num_samples += y.size(0)
+            epoch_loss += loss.item()
+            num_batches += 1
 
             if verbose and t % 100 == 0:
                 print(f"Iteration {t}, loss = {loss.item():.4f}")
@@ -247,20 +252,23 @@ def train_model(model, optimizer, loader_train, loader_val,
         train_acc = num_correct / num_samples
         train_acc_history.append(train_acc)
 
+        # Validation accuracy for this epoch
+        val_acc = check_accuracy(loader_val, model, device=device, dtype=dtype)
+        val_acc_history.append(val_acc)
+
+        # Record the current learning rate
+        current_lr = optimizer.param_groups[0]['lr']
+        lr_history.append(current_lr)
+
+        avg_loss = epoch_loss / num_batches
+        train_loss_history.append(avg_loss)
+
         # Adjust learning rate and record it
         if scheduler:
             scheduler.step()
         else:
             adjust_learning_rate(
                 optimizer, learning_rate_decay, epoch, schedule)
-
-        # Record the current learning rate
-        current_lr = optimizer.param_groups[0]['lr']
-        lr_history.append(current_lr)
-
-        # Validation accuracy for this epoch
-        val_acc = check_accuracy(loader_val, model, device=device, dtype=dtype)
-        val_acc_history.append(val_acc)
 
         if verbose:
             print(
@@ -269,7 +277,7 @@ def train_model(model, optimizer, loader_train, loader_val,
         # Save model checkpoint
         torch.save(model.state_dict(), model_path)
 
-    return train_acc_history, val_acc_history, lr_history
+    return train_acc_history, val_acc_history, lr_history, train_loss_history
 
 
 def plot_val_train_acc(train_acc_history, val_acc_history):
@@ -286,20 +294,21 @@ def plot_val_train_acc(train_acc_history, val_acc_history):
 
 
 def plot_learning_rate(lr_history):
-    """
-    Plots the learning rate over epochs.
-
-    Inputs:
-    - lr_history: List of learning rates recorded during training.
-
-    Outputs:
-    - None (displays the plot).
-    """
     plt.figure(figsize=(8, 6))
     plt.plot(lr_history, marker='o', linestyle='-', color='b')
     plt.title("Learning Rate Schedule")
     plt.xlabel("Epoch")
     plt.ylabel("Learning Rate")
+    plt.grid(True)
+    plt.show()
+
+
+def plot_loss(loss_history):
+    plt.figure(figsize=(8, 6))
+    plt.plot(loss_history, marker='o', linestyle='-', color='b')
+    plt.title("Loss History")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
     plt.grid(True)
     plt.show()
 

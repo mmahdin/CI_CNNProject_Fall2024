@@ -22,17 +22,18 @@ def load_CIFAR10(data_dir, batch_size=128, validation_split=0.1, num_workers=2):
 
     # Define transformations
     train_transform = transforms.Compose([
+        transforms.RandomHorizontalFlip(),  # Randomly flip the images horizontally
+        # Randomly crop the image with padding
         transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465),
-                             (0.2470, 0.2435, 0.2616)),
+        transforms.ToTensor(),  # Convert image to PyTorch tensor
+        transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[
+                             0.247, 0.243, 0.261])
     ])
 
     test_transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465),
-                             (0.2470, 0.2435, 0.2616)),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
+                             0.229, 0.224, 0.225])  # Normalize as above
     ])
 
     # Load datasets
