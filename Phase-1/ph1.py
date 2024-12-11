@@ -206,10 +206,12 @@ def train_model(model, optimizer, loader_train, loader_val,
     Returns:
     - train_acc_history: List of training accuracies during training.
     - val_acc_history: List of validation accuracies during training.
+    - lr_history: List of learning rates during training.
     """
     model = model.to(device)
     train_acc_history = []
     val_acc_history = []
+    lr_history = []  # Track learning rates
 
     for epoch in range(epochs):
         model.train()  # Set model to training mode
@@ -244,12 +246,16 @@ def train_model(model, optimizer, loader_train, loader_val,
         train_acc = num_correct / num_samples
         train_acc_history.append(train_acc)
 
-        # Adjust learning rate if scheduler is provided
+        # Adjust learning rate and record it
         if scheduler:
             scheduler.step()
         else:
             adjust_learning_rate(
                 optimizer, learning_rate_decay, epoch, schedule)
+
+        # Record the current learning rate
+        current_lr = optimizer.param_groups[0]['lr']
+        lr_history.append(current_lr)
 
         # Validation accuracy for this epoch
         val_acc = check_accuracy(loader_val, model, device=device, dtype=dtype)
@@ -257,12 +263,12 @@ def train_model(model, optimizer, loader_train, loader_val,
 
         if verbose:
             print(
-                f"Epoch {epoch + 1} complete: Train Acc = {train_acc:.4f}, Val Acc = {val_acc:.4f}")
+                f"Epoch {epoch + 1} complete: Train Acc = {train_acc:.4f}, Val Acc = {val_acc:.4f}, LR = {current_lr:.6f}")
 
         # Save model checkpoint
         torch.save(model.state_dict(), model_path)
 
-    return train_acc_history, val_acc_history
+    return train_acc_history, val_acc_history, lr_history
 
 
 def plot_val_train_acc(train_acc_history, val_acc_history):
