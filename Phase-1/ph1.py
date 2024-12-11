@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import matplotlib.pyplot as plt
 import random
+import torch.nn.init as init
 
 ################################################################################
 # ResNet for CIFAR-10
@@ -282,3 +283,40 @@ def plot_val_train_acc(train_acc_history, val_acc_history):
     plt.legend()
     plt.grid(True)
     plt.show()
+
+
+def plot_learning_rate(lr_history):
+    """
+    Plots the learning rate over epochs.
+
+    Inputs:
+    - lr_history: List of learning rates recorded during training.
+
+    Outputs:
+    - None (displays the plot).
+    """
+    plt.figure(figsize=(8, 6))
+    plt.plot(lr_history, marker='o', linestyle='-', color='b')
+    plt.title("Learning Rate Schedule")
+    plt.xlabel("Epoch")
+    plt.ylabel("Learning Rate")
+    plt.grid(True)
+    plt.show()
+
+
+def initialize_weights(m):
+    """
+    Initialize weights of the model.
+    Applies Kaiming initialization to Conv2D layers and Xavier initialization to Linear layers.
+    """
+    if isinstance(m, nn.Conv2d):
+        init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+        if m.bias is not None:
+            init.constant_(m.bias, 0)
+    elif isinstance(m, nn.Linear):
+        init.xavier_normal_(m.weight)
+        if m.bias is not None:
+            init.constant_(m.bias, 0)
+    elif isinstance(m, nn.BatchNorm2d):
+        init.constant_(m.weight, 1)
+        init.constant_(m.bias, 0)
