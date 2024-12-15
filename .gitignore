@@ -3,3 +3,5 @@ Phase-1/datasets/
 Phase-1/best.pth
 Phase-1/models/
 Phase-2/dataset/
+Phase-2/text.py
+Phase-2/models/
