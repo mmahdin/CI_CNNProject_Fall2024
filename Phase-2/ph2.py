@@ -5,6 +5,7 @@ import torch.optim as optim
 import matplotlib.pyplot as plt
 import random
 import torch.nn.init as init
+from sklearn.metrics import precision_score, recall_score, f1_score
 
 ################################################################################
 # ResNet for CIFAR-10
@@ -123,35 +124,49 @@ class ResNet(nn.Module):
 
 
 def reset_seed(number):
-    """
-    Reset random seed to the specific number
-
-    Inputs:
-    - number: A seed number to use
-    """
     random.seed(number)
     torch.manual_seed(number)
     return
 
 
 def adjust_learning_rate(optimizer, lrd, epoch, schedule):
-    """
-    Adjusts the learning rate by multiplying it with lrd at specified epochs.
-
-    Inputs:
-    - optimizer: PyTorch optimizer object.
-    - lrd: Learning rate decay factor.
-    - epoch: Current epoch number.
-    - schedule: List of epochs to decay the learning rate.
-
-    Returns: None (updates optimizer's learning rate in place).
-    """
     if epoch in schedule:
         for param_group in optimizer.param_groups:
             old_lr = param_group['lr']
             new_lr = old_lr * lrd
             param_group['lr'] = new_lr
             print(f'Learning rate updated from {old_lr:.6f} to {new_lr:.6f}')
+
+
+def calculate_metrics(loader, model, device='cpu', dtype=torch.float32):
+    model.eval()
+    num_correct = 0
+    num_samples = 0
+    all_preds = []
+    all_labels = []
+
+    with torch.no_grad():
+        for data in loader:
+            images = data['image'].to(device=device, dtype=dtype)
+            labels = data['label'].to(device=device)
+
+            outputs = model(images)
+            _, preds = outputs.max(1)
+
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+            num_correct += (preds == labels).sum().item()
+            num_samples += labels.size(0)
+
+    accuracy = float(num_correct) / num_samples
+    precision = precision_score(
+        all_labels, all_preds, average='weighted', zero_division=0)
+    recall = recall_score(all_labels, all_preds,
+                          average='weighted', zero_division=0)
+    f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
+
+    return accuracy, precision, recall, f1
 
 
 def check_accuracy(loader, model, device='cpu', dtype=torch.float32):
@@ -194,82 +209,80 @@ def train_model(
     scheduler=None, learning_rate_decay=0.1, schedule=[],
     verbose=True, model_path='./models/best.pth'
 ):
-    """
-    Train a PyTorch model using the provided data loaders and optimizer.
-
-    Inputs:
-    - model: PyTorch model to train.
-    - optimizer: Optimizer for updating model weights.
-    - loader_train: DataLoader for training data.
-    - loader_val: DataLoader for validation data.
-    - device: Computation device ('cpu' or 'cuda').
-    - dtype: Data type for tensors (default: torch.float32).
-    - epochs: Number of epochs for training.
-    - scheduler: Learning rate scheduler (optional).
-    - learning_rate_decay: Decay factor for learning rate (if no scheduler).
-    - schedule: Epochs to adjust learning rate manually (if no scheduler).
-    - verbose: Print progress information during training.
-    - model_path: Path to save the best model checkpoint.
-
-    Returns:
-    - train_acc_history: List of training accuracies for each epoch.
-    - val_acc_history: List of validation accuracies for each epoch.
-    - lr_history: List of learning rates for each epoch.
-    - train_loss_history: List of average training losses for each epoch.
-    """
     model = model.to(device)
-    train_acc_history = []
-    val_acc_history = []
+    train_metrics_history = {
+        'loss': [], 'accuracy': [], 'precision': [], 'recall': [], 'f1': []
+    }
+    val_metrics_history = {
+        'accuracy': [], 'precision': [], 'recall': [], 'f1': []
+    }
     lr_history = []
-    train_loss_history = []
 
-    best_val_acc = 0.0  # Track the best validation accuracy
+    best_val_acc = 0.0
 
     for epoch in range(epochs):
         print(f"Epoch {epoch + 1}/{epochs}")
 
         # Training phase
-        model.train()  # Set model to training mode
+        model.train()
         epoch_loss = 0.0
         num_correct = 0
         num_samples = 0
-        num_batches = 0
+        all_preds = []
+        all_labels = []
 
         for batch_idx, batch in enumerate(loader_train):
             x = batch["image"].to(device=device, dtype=dtype)
             y = batch["label"].to(device=device)
 
-            # Forward pass
             scores = model(x)
             loss = F.cross_entropy(scores, y)
 
-            # Backward pass
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-            # Update metrics
             _, preds = scores.max(1)
+
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(y.cpu().numpy())
+
             num_correct += (preds == y).sum().item()
             num_samples += y.size(0)
             epoch_loss += loss.item()
-            num_batches += 1
 
             if verbose and batch_idx % 100 == 0:
                 print(f"  Batch {batch_idx}, Loss = {loss.item():.4f}")
 
-        avg_loss = epoch_loss / num_batches
-        train_loss_history.append(avg_loss)
+        avg_loss = epoch_loss / len(loader_train)
+        train_metrics_history['loss'].append(avg_loss)
 
-        # Training accuracy
-        train_acc = num_correct / num_samples
-        train_acc_history.append(train_acc)
+        train_accuracy = float(num_correct) / num_samples
+        train_precision = precision_score(
+            all_labels, all_preds, average='weighted', zero_division=0)
+        train_recall = recall_score(
+            all_labels, all_preds, average='weighted', zero_division=0)
+        train_f1 = f1_score(all_labels, all_preds,
+                            average='weighted', zero_division=0)
 
-        print(f"  Training Loss: {avg_loss:.4f}, Accuracy: {train_acc:.4f}")
+        train_metrics_history['accuracy'].append(train_accuracy)
+        train_metrics_history['precision'].append(train_precision)
+        train_metrics_history['recall'].append(train_recall)
+        train_metrics_history['f1'].append(train_f1)
+
+        print(f"  Training Loss: {avg_loss:.4f}, Accuracy: {train_accuracy:.4f}, "
+              f"Precision: {train_precision:.4f}, Recall: {train_recall:.4f}, F1 Score: {train_f1:.4f}")
 
         # Validation phase
-        val_acc = check_accuracy(loader_val, model, device=device, dtype=dtype)
-        val_acc_history.append(val_acc)
+        val_accuracy, val_precision, val_recall, val_f1 = calculate_metrics(
+            loader_val, model, device=device, dtype=dtype)
+        val_metrics_history['accuracy'].append(val_accuracy)
+        val_metrics_history['precision'].append(val_precision)
+        val_metrics_history['recall'].append(val_recall)
+        val_metrics_history['f1'].append(val_f1)
+
+        print(f"  Validation Accuracy: {val_accuracy:.4f}, Precision: {val_precision:.4f}, "
+              f"Recall: {val_recall:.4f}, F1 Score: {val_f1:.4f}")
 
         # Update learning rate
         if scheduler:
@@ -278,19 +291,38 @@ def train_model(
             adjust_learning_rate(
                 optimizer, learning_rate_decay, epoch, schedule)
 
-        # Record learning rate
         current_lr = optimizer.param_groups[0]['lr']
         lr_history.append(current_lr)
 
-        # Save the best model based on validation accuracy
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
+        if val_accuracy > best_val_acc:
+            best_val_acc = val_accuracy
             torch.save(model.state_dict(), model_path)
             print(
-                f"  Best model saved with Validation Accuracy: {val_acc:.4f}")
+                f"  Best model saved with Validation Accuracy: {val_accuracy:.4f}")
 
     print("Training complete!")
-    return train_acc_history, val_acc_history, lr_history, train_loss_history
+    return train_metrics_history, val_metrics_history, lr_history
+
+
+def plot_metrics(metrics_history_train, metrics_history_val, metric_name):
+    plt.figure(figsize=(10, 6))
+    plt.plot(metrics_history_train, label=f'Train {metric_name}', marker='o')
+    plt.plot(metrics_history_val,
+             label=f'Validation {metric_name}', marker='o')
+    plt.xlabel('Epochs')
+    plt.ylabel(metric_name.capitalize())
+    plt.title(f'{metric_name.capitalize()} over Epochs')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+# Plot for all metrics
+
+
+def plot_all_metrics(train_metrics, val_metrics):
+    for metric in train_metrics.keys():
+        if metric in val_metrics:
+            plot_metrics(train_metrics[metric], val_metrics[metric], metric)
 
 
 def plot_val_train_acc(train_acc_history, val_acc_history):
