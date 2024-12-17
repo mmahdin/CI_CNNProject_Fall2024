@@ -9,6 +9,7 @@ from sklearn.metrics import precision_score, recall_score, f1_score
 from PIL import Image
 import pandas as pd
 import numpy as np
+import os
 ################################################################################
 # ResNet for CIFAR-10
 ################################################################################
@@ -209,7 +210,8 @@ def train_model(
     model, optimizer, loader_train, loader_val,
     device='cuda', dtype=torch.float32, epochs=1,
     scheduler=None, learning_rate_decay=0.1, schedule=[],
-    verbose=True, model_path='./models/best.pth'
+    verbose=True, checkpoint_path='./models/checkpoint.pth',
+    history_path='./history/train_history.pkl'
 ):
     model = model.to(device)
     train_metrics_history = {
@@ -219,10 +221,25 @@ def train_model(
         'accuracy': [], 'precision': [], 'recall': [], 'f1': []
     }
     lr_history = []
-
     best_val_acc = 0.0
+    start_epoch = 0
 
-    for epoch in range(epochs):
+    # Check if a checkpoint exists
+    if os.path.exists(checkpoint_path):
+        print("Resuming training from checkpoint...")
+        checkpoint = torch.load(checkpoint_path)
+        model.load_state_dict(checkpoint['model_state'])
+        optimizer.load_state_dict(checkpoint['optimizer_state'])
+        if scheduler:
+            scheduler.load_state_dict(checkpoint['scheduler_state'])
+        start_epoch = checkpoint['epoch']
+        train_metrics_history = checkpoint['train_history']
+        val_metrics_history = checkpoint['val_history']
+        lr_history = checkpoint['lr_history']
+        best_val_acc = checkpoint['best_val_acc']
+        print(f"Resumed training from epoch {start_epoch}")
+
+    for epoch in range(start_epoch, epochs):
         print(f"Epoch {epoch + 1}/{epochs}")
 
         # Training phase
@@ -245,7 +262,6 @@ def train_model(
             optimizer.step()
 
             _, preds = scores.max(1)
-
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(y.cpu().numpy())
 
@@ -258,7 +274,6 @@ def train_model(
 
         avg_loss = epoch_loss / len(loader_train)
         train_metrics_history['loss'].append(avg_loss)
-
         train_accuracy = float(num_correct) / num_samples
         train_precision = precision_score(
             all_labels, all_preds, average='weighted', zero_division=0)
@@ -296,11 +311,19 @@ def train_model(
         current_lr = optimizer.param_groups[0]['lr']
         lr_history.append(current_lr)
 
-        if val_accuracy > best_val_acc:
-            best_val_acc = val_accuracy
-            torch.save(model.state_dict(), model_path)
-            print(
-                f"  Best model saved with Validation Accuracy: {val_accuracy:.4f}")
+        # Save checkpoint
+        checkpoint = {
+            'epoch': epoch + 1,
+            'model_state': model.state_dict(),
+            'optimizer_state': optimizer.state_dict(),
+            'scheduler_state': scheduler.state_dict() if scheduler else None,
+            'train_history': train_metrics_history,
+            'val_history': val_metrics_history,
+            'lr_history': lr_history,
+            'best_val_acc': best_val_acc
+        }
+        torch.save(checkpoint, checkpoint_path)
+        print(f"  Checkpoint saved at epoch {epoch + 1}")
 
     print("Training complete!")
     return train_metrics_history, val_metrics_history, lr_history
