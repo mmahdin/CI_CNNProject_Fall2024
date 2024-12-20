@@ -415,7 +415,7 @@ def initialize_weights(m):
         init.constant_(m.bias, 0)
 
 
-def get_train_data(folder, base_path, batch_size, base_dir):
+def get_train_data(folder, base_path, batch_size, augmented_dir):
     total_images = 0
     for n in range(len(folder)):
         patient_id = folder[n]
@@ -498,7 +498,7 @@ def get_train_data(folder, base_path, batch_size, base_dir):
 
     # Define source and destination directories
     # Replace with your desired output directory
-    dest_dir = f"{base_dir}/dataset/agmented"
+    dest_dir = f"{augmented_dir}"
 
     # Function to apply augmentation techniques
     def augment_image(image):
@@ -553,32 +553,32 @@ def get_train_data(folder, base_path, batch_size, base_dir):
             if flg:
                 continue
 
-            # try:
-            #     image = Image.open(image_path)
-            # except Exception as e:
-            #     print(f"Error loading image {image_path}: {e}")
-            #     continue
+            try:
+                image = Image.open(image_path)
+            except Exception as e:
+                print(f"Error loading image {image_path}: {e}")
+                continue
 
-            # # Apply augmentation techniques
-            # augmented_images = augment_image(image)
+            # Apply augmentation techniques
+            augmented_images = augment_image(image)
 
-            # for aug_image in augmented_images:
-            #     new_image_name = os.path.basename(
-            #         aug_image[0] + '_' + image_path.split('/')[-1])  # Keep original name
-            #     new_image_path = os.path.join(dest_dir, new_image_name)
+            for aug_image in augmented_images:
+                new_image_name = os.path.basename(
+                    aug_image[0] + '_' + image_path.split('/')[-1])  # Keep original name
+                new_image_path = os.path.join(dest_dir, new_image_name)
 
-            #     # Save augmented image
-            #     print(new_image_path)
-            #     aug_image[1].save(new_image_path)
+                # Save augmented image
+                print(new_image_path)
+                aug_image[1].save(new_image_path)
 
-            #     # Add new row to the dataset
-            #     new_rows.append({
-            #         'patient_id': patient_id,
-            #         'path': new_image_path,
-            #         'target': minority_class,  # Same class as the original
-            #         'x': x,
-            #         'y': y
-            #     })
+                # Add new row to the dataset
+                new_rows.append({
+                    'patient_id': patient_id,
+                    'path': new_image_path,
+                    'target': minority_class,  # Same class as the original
+                    'x': x,
+                    'y': y
+                })
             # Check if balance is achieved
             if len(minority_data) + len(new_rows) >= majority_count:
                 break
