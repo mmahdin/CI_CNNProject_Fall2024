@@ -109,7 +109,7 @@ class ResNetStage(nn.Module):
 
 
 class ResNet(nn.Module):
-    def __init__(self, stage_args, Cin=3, block=ResidualBlock, num_classes=10, dropout=False, p=0.5):
+    def __init__(self, stage_args, Cin=3, block=ResidualBlock, num_classes=2, dropout=False, p=0.5):
         super().__init__()
         self.cnn = nn.Sequential(
             ResNetStem(Cin=Cin, Cout=stage_args[0][0]),
@@ -211,7 +211,7 @@ def train_model(
     device='cuda', dtype=torch.float32, epochs=1,
     scheduler=None, learning_rate_decay=0.1, schedule=[],
     verbose=True, checkpoint_path='./models/checkpoint.pth',
-    history_path='./history/train_history.pkl'
+    history_path='./history/train_history.pkl', class_weights_tensor=None
 ):
     model = model.to(device)
     train_metrics_history = {
@@ -223,6 +223,10 @@ def train_model(
     lr_history = []
     best_val_acc = 0.0
     start_epoch = 0
+
+    if class_weights_tensor != None:
+        print('class_weights_tensor')
+        loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights_tensor)
 
     # Check if a checkpoint exists
     if os.path.exists(checkpoint_path):
@@ -255,7 +259,10 @@ def train_model(
             y = batch["label"].to(device=device)
 
             scores = model(x)
-            loss = F.cross_entropy(scores, y)
+            if class_weights_tensor != None:
+                loss = loss_fn(scores, y)
+            else:
+                loss = F.cross_entropy(scores, y)
 
             optimizer.zero_grad()
             loss.backward()
