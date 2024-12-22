@@ -167,6 +167,8 @@ def calculate_metrics(loader, model, device='cpu', dtype=torch.float32):
         all_labels, all_preds, average='weighted', zero_division=0)
     recall = recall_score(all_labels, all_preds,
                           average='weighted', zero_division=0)
+    print(all_labels)
+    print(all_preds)
     f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
 
     return accuracy, precision, recall, f1
