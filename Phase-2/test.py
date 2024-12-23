@@ -361,8 +361,8 @@ print(device)
 ##################################################################################
 #                                       MAIN                                     #
 ##################################################################################
-lr = 0.0005
-weight_decay = 1e-3
+lr = 1e-6
+weight_decay = 5e-4
 epochs = 50
 
 # Model and file paths
@@ -374,7 +374,7 @@ history_path = f'./history/{name}_{version}.pth'
 
 min_lr = 1e-6
 max_lr = 0.006
-max_iterations = len(dataloaders["train"])/2
+max_iterations = int(len(dataloaders["train"])/2)
 
 
 if os.path.exists(checkpoint_path):
@@ -384,8 +384,9 @@ if os.path.exists(checkpoint_path):
     model = get_resnet(name).to(device)
     model.load_state_dict(checkpoint['model_state'])
 
-    # optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    optimizer = optim.SGD(model.fc.parameters(), min_lr)
+    optimizer = optim.Adam(model.parameters(), lr=lr,
+                           weight_decay=weight_decay)
+    # optimizer = optim.SGD(model.fc.parameters(), min_lr)
     optimizer.load_state_dict(checkpoint['optimizer_state'])
 
     scheduler = CyclicLR(optimizer=optimizer,
@@ -414,8 +415,9 @@ else:
     model = get_resnet(name).to(device)
     model.apply(initialize_weights)
 
-    # optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    optimizer = optim.SGD(model.fc.parameters(), min_lr)
+    optimizer = optim.Adam(model.parameters(), lr=lr,
+                           weight_decay=weight_decay)
+    # optimizer = optim.SGD(model.fc.parameters(), min_lr)
 
     # Define scheduler
     scheduler = CyclicLR(optimizer=optimizer,
