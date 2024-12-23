@@ -10,6 +10,7 @@ from PIL import Image
 import pandas as pd
 import numpy as np
 import os
+import time
 ################################################################################
 # ResNet for CIFAR-10
 ################################################################################
@@ -167,8 +168,7 @@ def calculate_metrics(loader, model, device='cpu', dtype=torch.float32):
         all_labels, all_preds, average='weighted', zero_division=0)
     recall = recall_score(all_labels, all_preds,
                           average='weighted', zero_division=0)
-    print(all_labels)
-    print(all_preds)
+
     f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
 
     return accuracy, precision, recall, f1
@@ -247,6 +247,7 @@ def train_model(
 
     for epoch in range(start_epoch, epochs):
         print(f"Epoch {epoch + 1}/{epochs}")
+        start_time = time.time()  # Start time for epoch
 
         # Training phase
         model.train()
@@ -269,6 +270,10 @@ def train_model(
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            if scheduler:
+                scheduler.step()
+                current_lr = optimizer.param_groups[0]['lr']
+                lr_history.append(current_lr)
 
             _, preds = scores.max(1)
             all_preds.extend(preds.cpu().numpy())
@@ -311,14 +316,9 @@ def train_model(
               f"Recall: {val_recall:.4f}, F1 Score: {val_f1:.4f}")
 
         # Update learning rate
-        if scheduler:
-            scheduler.step()
-        else:
+        if not scheduler:
             adjust_learning_rate(
                 optimizer, learning_rate_decay, epoch, schedule)
-
-        current_lr = optimizer.param_groups[0]['lr']
-        lr_history.append(current_lr)
 
         # Save checkpoint
         checkpoint = {
@@ -333,6 +333,12 @@ def train_model(
         }
         torch.save(checkpoint, checkpoint_path)
         print(f"  Checkpoint saved at epoch {epoch + 1}")
+
+        # Print time spent for the epoch
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        print(
+            f"  Time spent for epoch {epoch + 1}: {elapsed_time:.2f} seconds")
 
     print("Training complete!")
     return train_metrics_history, val_metrics_history, lr_history
