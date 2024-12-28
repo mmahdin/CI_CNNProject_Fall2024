@@ -9,7 +9,7 @@ from PIL import Image
 from sklearn.model_selection import train_test_split
 from collections import Counter
 import numpy as np
-from torch.nn.utils.rnn import pad_sequence
+import time
 import random
 
 #########################################################################
@@ -686,9 +686,9 @@ class CaptioningRNN(nn.Module):
 
         vocab_size = len(word_to_idx)
 
-        self._null = word_to_idx['<NULL>']
-        self._start = word_to_idx.get('<START>', None)
-        self._end = word_to_idx.get('<END>', None)
+        self._null = word_to_idx['<pad>']
+        self._start = word_to_idx.get('<start>', None)
+        self._end = word_to_idx.get('<end>', None)
         self.ignore_index = ignore_index
 
         self.wordvec_dim = wordvec_dim
@@ -697,10 +697,10 @@ class CaptioningRNN(nn.Module):
         self.rnn = None
         self.affine = nn.Linear(input_dim, hidden_dim).to(
             device=device, dtype=dtype)
+
         if cell_type == 'rnn' or cell_type == 'lstm':
             self.feat_extract = FeatureExtractor(
                 pooling=True, device=device, dtype=dtype)
-            # self.affine = nn.Linear(input_dim, hidden_dim).to(device=device, dtype=dtype)
             if cell_type == 'rnn':
                 self.rnn = RNN(wordvec_dim, hidden_dim,
                                device=device, dtype=dtype)
@@ -900,3 +900,126 @@ class WordEmbedding(nn.Module):
         out = self.W_embed[x]
 
         return out
+
+
+#########################################################################
+#                                  Train                                #
+#########################################################################
+
+
+def train_captioning_model(
+    rnn_decoder, optimizer, data_dict,
+    device='cuda', dtype=torch.float32, epochs=1, batch_size=256,
+    scheduler=None, val_perc=0.5,
+    verbose=True, checkpoint_path='./models/captioning_checkpoint.pth',
+    history_path='./history/captioning_train_history.pkl', vocab_size=None
+):
+
+    total_images = len(data_dict["train_images"])
+    num_batches = math.ceil(total_images // batch_size)
+
+    total_images_val = len(data_dict["val_images"])*val_perc
+    val_batch_size = 32
+    num_batches_val = math.ceil(total_images_val // val_batch_size)
+
+    rnn_decoder = rnn_decoder.to(device)
+
+    train_loss_history = []
+    val_loss_history = []
+    best_val_loss = float('inf')
+    start_epoch = 0
+
+    # Check if a checkpoint exists
+    if os.path.exists(checkpoint_path):
+        print("Resuming training from checkpoint...")
+        checkpoint = torch.load(checkpoint_path)
+        rnn_decoder.load_state_dict(checkpoint['rnn_decoder_state'])
+        optimizer.load_state_dict(checkpoint['optimizer_state'])
+        if scheduler:
+            scheduler.load_state_dict(checkpoint['scheduler_state'])
+        start_epoch = checkpoint['epoch']
+        train_loss_history = checkpoint['train_loss_history']
+        val_loss_history = checkpoint['val_loss_history']
+        best_val_loss = checkpoint['best_val_loss']
+        print(f"Resumed training from epoch {start_epoch}")
+
+    for epoch in range(start_epoch, epochs):
+        print(f"Epoch {epoch + 1}/{epochs}")
+        start_time = time.time()  # Start time for epoch
+
+        # Training phase
+        rnn_decoder.train()
+        epoch_loss = 0.0
+
+        for j in range(num_batches):
+            images = data_dict['train_images'][batch_size*j:batch_size*(j+1)]
+            captions = data_dict['train_captions'][batch_size *
+                                                   j:batch_size*(j+1)]
+            for cap_idx in range(captions.shape[1]):
+                image = images.to(device=device, dtype=dtype)
+                caption = captions[:, cap_idx, :].to(device=device)
+
+                # Forward pass through the CNN encoder and RNN decoder
+                loss = rnn_decoder(image, caption)
+
+                # Backpropagation and optimization
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                if scheduler:
+                    scheduler.step()
+
+                epoch_loss += loss.item()
+
+            if verbose and j % 10 == 0:
+                print(
+                    f"  Batch {j+1}/{num_batches}, Loss = {loss.item():.4f}")
+
+        avg_loss = epoch_loss / (num_batches*captions.shape[1])
+        train_loss_history.append(avg_loss)
+
+        print(f"  Training Loss: {avg_loss:.4f}")
+
+        # Validation phase
+        rnn_decoder.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for j in range(num_batches_val):
+                images = data_dict['val_images'][val_batch_size *
+                                                 j:val_batch_size*(j+1)]
+                captions = data_dict['val_captions'][val_batch_size *
+                                                     j:val_batch_size*(j+1)]
+                for cap_idx in range(captions.shape[1]):
+                    image = images.to(device=device, dtype=dtype)
+                    caption = captions[:, cap_idx, :].to(device=device)
+
+                    loss = rnn_decoder(image, caption)
+
+                    val_loss += loss.item()
+
+        avg_val_loss = val_loss / (total_images_val*captions.shape[1])
+        val_loss_history.append(avg_val_loss)
+
+        print(f"  Validation Loss: {avg_val_loss:.4f}")
+
+        # Save checkpoint if validation loss improves
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            checkpoint = {
+                'epoch': epoch + 1,
+                'rnn_decoder_state': rnn_decoder.state_dict(),
+                'optimizer_state': optimizer.state_dict(),
+                'scheduler_state': scheduler.state_dict() if scheduler else None,
+                'train_loss_history': train_loss_history,
+                'val_loss_history': val_loss_history,
+                'best_val_loss': best_val_loss
+            }
+            torch.save(checkpoint, checkpoint_path)
+
+        # Print time spent for the epoch
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+
+    print("Training complete!")
+    return train_loss_history, val_loss_history
