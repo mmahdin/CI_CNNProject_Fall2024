@@ -933,7 +933,7 @@ def train_captioning_model(
     if os.path.exists(checkpoint_path):
         print("Resuming training from checkpoint...")
         checkpoint = torch.load(checkpoint_path)
-        rnn_decoder.load_state_dict(checkpoint['rnn_decoder_state'])
+        rnn_decoder.load_state_dict(checkpoint['model_state'])
         optimizer.load_state_dict(checkpoint['optimizer_state'])
         if scheduler:
             scheduler.load_state_dict(checkpoint['scheduler_state'])
@@ -1008,7 +1008,7 @@ def train_captioning_model(
             best_val_loss = avg_val_loss
             checkpoint = {
                 'epoch': epoch + 1,
-                'rnn_decoder_state': rnn_decoder.state_dict(),
+                'model_state': rnn_decoder.state_dict(),
                 'optimizer_state': optimizer.state_dict(),
                 'scheduler_state': scheduler.state_dict() if scheduler else None,
                 'train_loss_history': train_loss_history,
