@@ -17,6 +17,7 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from PIL import Image
 
+N_P = 4
 
 #########################################################################
 #                           FeatureExtractor                            #
@@ -48,9 +49,7 @@ class FeatureExtractor(object):
         # average pooling
         if pooling:
             # input: N x 1280 x 4 x 4
-            self.mobilenet.add_module('LastAvgPool', nn.AvgPool2d(8, 8))
-        else:
-            self.mobilenet.add_module('LastAvgPool', nn.AvgPool2d(2, 2))
+            self.mobilenet.add_module('LastAvgPool', nn.AvgPool2d(4, 4))
 
         self.mobilenet.eval()
 
@@ -103,8 +102,8 @@ def get_augmentation_pipeline(image_size):
                      height=int(image_size[1]*0.9), p=0.5),
         # Apply Gaussian blur, ensure blur_limit >= 3
         A.GaussianBlur(blur_limit=3, p=0.5),
-        A.CoarseDropout(max_holes=30, max_height=5, max_width=5,
-                        min_holes=20, p=0.6),  # Coarse dropout
+        A.CoarseDropout(max_holes=15, max_height=3, max_width=3,
+                        min_holes=5, p=0.6),  # Coarse dropout
         A.Resize(*image_size),
         ToTensorV2()
     ])
@@ -604,7 +603,7 @@ def dot_product_attention(prev_h, A):
             ).reshape(N, -1, 1)  # N * 16 * 1
     Matt_tilt = F.softmax(Matt, dim=1)  # probability
     attn = torch.bmm(A_tilt, Matt_tilt).reshape(N, H)
-    attn_weights = Matt_tilt.reshape(N, 4, 4)
+    attn_weights = Matt_tilt.reshape(N, N_P, N_P)
 
     return attn, attn_weights
 
@@ -880,7 +879,8 @@ ear(input_dim, hidden_dim).to(device=device, dtype=dtype),
         captions = self._null * images.new(N, max_length).fill_(1).long()
 
         if self.cell_type == 'attention':
-            attn_weights_all = images.new(N, max_length, 4, 4).fill_(0).float()
+            attn_weights_all = images.new(
+                N, max_length, N_P, N_P).fill_(0).float()
 
         feature = self.feat_extract.extract_mobilenet_feature(images)
         A = None
@@ -1038,29 +1038,29 @@ def train_captioning_model(
 
         for j in range(num_batches):
             images = data_dict['train_images'][batch_size*j:batch_size*(j+1)]
-            num_aug = 5
+            num_aug = 2
             images_torch = process_images_batch(
                 images, image_size=image_size, augment=True, num_augmented=num_aug).to(device=device, dtype=dtype)
             captions = data_dict['train_captions'][batch_size *
                                                    j:batch_size*(j+1)]
-            for cap_idx in range(captions.shape[1]):
+            for ag in range(num_aug):
+                cap_idx = random.randint(0, captions.shape[1])-1
                 caption = captions[:, cap_idx, :].to(device=device)
-                for ag in range(num_aug):
-                    loss = rnn_decoder(images_torch[:, ag, :, :], caption)
-                    optimizer.zero_grad()
-                    loss.backward()
-                    optimizer.step()
+                loss = rnn_decoder(images_torch[:, ag, :, :], caption)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-                    if scheduler:
-                        scheduler.step()
+                if scheduler:
+                    scheduler.step()
 
-                    epoch_loss += loss.item()
+                epoch_loss += loss.item()
 
             if verbose and j % 10 == 0:
                 print(
                     f"  Batch {j+1}/{num_batches}, Loss = {loss.item():.4f}")
 
-        avg_loss = epoch_loss / (num_aug*num_batches*captions.shape[1])
+        avg_loss = epoch_loss / (num_aug*num_batches)
         train_loss_history.append(avg_loss)
 
         print(f"  Training Loss: {avg_loss:.4f}")
