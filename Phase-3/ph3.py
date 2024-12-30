@@ -26,43 +26,51 @@ N_P = 4
 
 class FeatureExtractor(object):
     """
-    Image feature extraction with MobileNet.
+    Image feature extraction with ResNet50.
     """
 
     def __init__(self, pooling=False, verbose=False, device='cuda', dtype=torch.float32):
+        import torch
+        import torch.nn as nn
         from torchvision import transforms, models
-        from torchvision.models import MobileNet_V2_Weights
+        from torchvision.models import ResNet50_Weights
 
         self.preprocess = transforms.Compose([
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                                  0.229, 0.224, 0.225]),
         ])
         self.device, self.dtype = device, dtype
+        self.pooling = pooling
 
-        # Use the recommended 'weights' parameter
-        self.mobilenet = models.mobilenet_v2(
-            weights=MobileNet_V2_Weights.IMAGENET1K_V1).to(device)
+        # Load ResNet50 with pretrained weights
+        self.resnet = models.resnet50(
+            weights=ResNet50_Weights.IMAGENET1K_V1).to(device)
 
-        # Remove the last classifier
-        self.mobilenet = nn.Sequential(*list(self.mobilenet.children())[:-1])
+        # Remove the last layers (avgpool and fc) to retain spatial features
+        self.resnet = nn.Sequential(*list(self.resnet.children())[:-2])
 
-        # average pooling
+        # If pooling is applied, add global average pooling
         if pooling:
-            # input: N x 1280 x 4 x 4
-            self.mobilenet.add_module('LastAvgPool', nn.AvgPool2d(4, 4))
+            self.resnet.add_module(
+                'GlobalAvgPool', nn.AdaptiveAvgPool2d((1, 1)))
 
-        self.mobilenet.eval()
+        self.resnet.eval()
 
-    def extract_mobilenet_feature(self, img, verbose=False):
+    def extract_resnet_feature(self, img, verbose=False):
         """
         Inputs:
-        - img: Batch of resized images, of shape N x 3 x 112 x 112
+        - img: Batch of resized images, of shape N x 3 x H x W (e.g., 224 x 224)
 
         Outputs:
-        - feat: Image feature, of shape N x 1280 (pooled) or N x 1280 x 4 x 4
+        - feat: Image feature, of shape N x 2048 (if pooling is applied) or N x 2048 x 4 x 4 (if not applied)
         """
+        import math
+        import torch.nn.functional as F
+        import torch
+
         num_img = img.shape[0]
 
+        # Preprocess each image in the batch
         img_prepro = []
         for i in range(num_img):
             img_prepro.append(self.preprocess(
@@ -72,13 +80,20 @@ class FeatureExtractor(object):
         with torch.no_grad():
             feat = []
             process_batch = 500
-            for b in range(math.ceil(num_img/process_batch)):
-                feat.append(self.mobilenet(img_prepro[b*process_batch:(b+1)*process_batch]
-                                           ).squeeze(-1).squeeze(-1))  # forward and squeeze
+            for b in range(math.ceil(num_img / process_batch)):
+                # Pass the batch through the model
+                output = self.resnet(
+                    img_prepro[b * process_batch:(b + 1) * process_batch])
+                feat.append(output)
             feat = torch.cat(feat)
 
-            # add l2 normalization
-            F.normalize(feat, p=2, dim=1)
+            # If pooling is applied, flatten the output
+            if self.pooling:
+                feat = feat.view(feat.size(0), -1)  # N x 2048
+
+            # Add L2 normalization
+            feat = F.normalize(feat.view(feat.size(0), -1),
+                               p=2, dim=1).view_as(feat)
 
         if verbose:
             print('Output feature shape: ', feat.shape)
@@ -832,8 +847,7 @@ ear(input_dim, hidden_dim).to(device=device, dtype=dtype),
 
         loss = 0.0
 
-        feature = self.feat_extract.extract_mobilenet_feature(
-            images)  # N x 1280
+        feature = self.feat_extract.extract_resnet_feature(images)  # N x 1280
         if self.cell_type == 'attention':
             # make it N * 4 * 4 * input_dim
             feature = feature.permute(0, 2, 3, 1)
@@ -882,7 +896,7 @@ ear(input_dim, hidden_dim).to(device=device, dtype=dtype),
             attn_weights_all = images.new(
                 N, max_length, N_P, N_P).fill_(0).float()
 
-        feature = self.feat_extract.extract_mobilenet_feature(images)
+        feature = self.feat_extract.extract_resnet_feature(images)
         A = None
         if self.cell_type == 'attention':
             # make it N * 4 * 4 * input_dim
