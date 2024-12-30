@@ -11,6 +11,8 @@ from collections import Counter
 import numpy as np
 import time
 import random
+import cv2
+import string
 
 #########################################################################
 #                           FeatureExtractor                            #
@@ -138,7 +140,17 @@ def process_captions(captions_list, vocab, max_caption_length):
     return torch.stack(caption_tensors)
 
 
-def load_data(file_path, captions_path, data_path, image_size):
+def preprocess_text(text):
+    # Remove punctuation
+    text = text.translate(str.maketrans("", "", string.punctuation))
+    # Convert to lowercase
+    text = text.lower()
+    # Optionally, add more cleaning steps (e.g., remove extra spaces)
+    text = " ".join(text.split())
+    return text
+
+
+def load_data(file_path, captions_path, data_path, image_size, test_size=0.1):
     if os.path.exists(file_path):
         dataset = torch.load(file_path)
         print("Dataset loaded successfully.")
@@ -165,13 +177,17 @@ def load_data(file_path, captions_path, data_path, image_size):
         grouped_captions = captions_df.groupby(
             "image")["caption"].apply(list).reset_index()
 
+        grouped_captions["caption"] = grouped_captions["caption"].apply(
+            lambda captions: [preprocess_text(caption) for caption in captions]
+        )
+
         # Filter images with exactly 5 captions
         grouped_captions = grouped_captions[grouped_captions["caption"].apply(
             len) == 5]
 
         # Split into train and validation sets
         train_df, val_df = train_test_split(
-            grouped_captions, test_size=0.2, random_state=42)
+            grouped_captions, test_size=test_size, random_state=42)
 
         vocab = Vocabulary()
         vocab.build_vocab(train_df["caption"].tolist())
@@ -661,11 +677,12 @@ class CaptioningRNN(nn.Module):
     """
 
     def __init__(self, word_to_idx, input_dim=512, wordvec_dim=128,
-                 hidden_dim=128, cell_type='rnn', device='cpu',
+                 hidden_dim=128, cell_type='rnn', device='cpu', p=0.0,
                  ignore_index=None, dtype=torch.float32):
         """
         Construct a new CaptioningRNN instance.
-
+ear(input_dim, hidden_dim).to(device=device, dtype=dtype),
+            nn.Dro
         Inputs:
         - word_to_idx: A dictionary giving the vocabulary. It contains V entries,
           and maps each string to a unique integer in the range [0, V).
@@ -695,8 +712,12 @@ class CaptioningRNN(nn.Module):
         self.feat_extract = None
         self.affine = None
         self.rnn = None
-        self.affine = nn.Linear(input_dim, hidden_dim).to(
+        self.affine_l = nn.Linear(input_dim, hidden_dim).to(
             device=device, dtype=dtype)
+        self.affine = nn.Sequential(
+            self.affine_l,
+            nn.Dropout(p=p)  # Adding dropout with a probability of 0.5
+        )
 
         if cell_type == 'rnn' or cell_type == 'lstm':
             self.feat_extract = FeatureExtractor(
@@ -714,14 +735,18 @@ class CaptioningRNN(nn.Module):
                 wordvec_dim, hidden_dim, device=device, dtype=dtype)
         else:
             raise ValueError
-        nn.init.kaiming_normal_(self.affine.weight)
-        nn.init.zeros_(self.affine.bias)
+        nn.init.kaiming_normal_(self.affine_l.weight)
+        nn.init.zeros_(self.affine_l.bias)
         self.word_embed = WordEmbedding(
             vocab_size, wordvec_dim, device=device, dtype=dtype)
-        self.temporal_affine = nn.Linear(
+        self.temporal_affine_l = nn.Linear(
             hidden_dim, vocab_size).to(device=device, dtype=dtype)
-        nn.init.kaiming_normal_(self.temporal_affine.weight)
-        nn.init.zeros_(self.temporal_affine.bias)
+        self.temporal_affine = nn.Sequential(
+            self.temporal_affine_l,
+            nn.Dropout(p=p)  # Adding dropout with a probability of 0.5
+        )
+        nn.init.kaiming_normal_(self.temporal_affine_l.weight)
+        nn.init.zeros_(self.temporal_affine_l.bias)
 
     def forward(self, images, captions):
         """
@@ -761,7 +786,7 @@ class CaptioningRNN(nn.Module):
 
         x = self.word_embed(captions_in)  # N x T x wordvec_dim
         h = self.rnn(x, h0)  # N x T x H
-        score = self.temporal_affine(h)
+        score = self.temporal_affine(h)  # N x T x V
         loss = temporal_softmax_loss(
             score, captions_out, ignore_index=self._null)
 
@@ -998,24 +1023,23 @@ def train_captioning_model(
 
                     val_loss += loss.item()
 
-        avg_val_loss = val_loss / (total_images_val*captions.shape[1])
+        avg_val_loss = val_loss / (num_batches_val*captions.shape[1])
         val_loss_history.append(avg_val_loss)
 
         print(f"  Validation Loss: {avg_val_loss:.4f}")
 
         # Save checkpoint if validation loss improves
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            checkpoint = {
-                'epoch': epoch + 1,
-                'model_state': rnn_decoder.state_dict(),
-                'optimizer_state': optimizer.state_dict(),
-                'scheduler_state': scheduler.state_dict() if scheduler else None,
-                'train_loss_history': train_loss_history,
-                'val_loss_history': val_loss_history,
-                'best_val_loss': best_val_loss
-            }
-            torch.save(checkpoint, checkpoint_path)
+        best_val_loss = avg_val_loss
+        checkpoint = {
+            'epoch': epoch + 1,
+            'model_state': rnn_decoder.state_dict(),
+            'optimizer_state': optimizer.state_dict(),
+            'scheduler_state': scheduler.state_dict() if scheduler else None,
+            'train_loss_history': train_loss_history,
+            'val_loss_history': val_loss_history,
+            'best_val_loss': best_val_loss
+        }
+        torch.save(checkpoint, checkpoint_path)
 
         # Print time spent for the epoch
         end_time = time.time()
@@ -1023,3 +1047,37 @@ def train_captioning_model(
 
     print("Training complete!")
     return train_loss_history, val_loss_history
+
+
+def attention_visualizer(img, attn_weights, token):
+    """
+    Visuailze the attended regions on a single frame from a single query word.
+    Inputs:
+    - img: Image tensor input, of shape (3, H, W)
+    - attn_weights: Attention weight tensor, on the final activation map
+    - token: The token string you want to display above the image
+
+    Outputs:
+    - img_output: Image tensor output, of shape (3, H+25, W)
+
+    """
+    C, H, W = img.shape
+    assert C == 3, 'We only support image with three color channels!'
+
+    # Reshape attention map
+    attn_weights = cv2.resize(attn_weights.data.numpy().copy(),
+                              (H, W), interpolation=cv2.INTER_NEAREST)
+    attn_weights = np.repeat(np.expand_dims(attn_weights, axis=2), 3, axis=2)
+
+    # Combine image and attention map
+    img_copy = img.permute(1, 2, 0).numpy()[
+        :, :, ::-1].copy()  # covert to BGR for cv2
+    masked_img = cv2.addWeighted(attn_weights, 0.5, img_copy, 0.5, 0)
+    img_copy = np.concatenate((np.zeros((25, W, 3)),
+                               masked_img), axis=0)
+
+    # Add text
+    cv2.putText(img_copy, '%s' % (token), (10, 15),
+                cv2.FONT_HERSHEY_PLAIN, 1.0, (255, 255, 255), thickness=1)
+
+    return img_copy
