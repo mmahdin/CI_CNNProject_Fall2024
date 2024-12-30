@@ -13,6 +13,10 @@ import time
 import random
 import cv2
 import string
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+from PIL import Image
+
 
 #########################################################################
 #                           FeatureExtractor                            #
@@ -44,7 +48,9 @@ class FeatureExtractor(object):
         # average pooling
         if pooling:
             # input: N x 1280 x 4 x 4
-            self.mobilenet.add_module('LastAvgPool', nn.AvgPool2d(4, 4))
+            self.mobilenet.add_module('LastAvgPool', nn.AvgPool2d(8, 8))
+        else:
+            self.mobilenet.add_module('LastAvgPool', nn.AvgPool2d(2, 2))
 
         self.mobilenet.eval()
 
@@ -85,19 +91,73 @@ class FeatureExtractor(object):
 #########################################################################
 
 
-def process_images(image_list, data_path, image_size):
+def get_augmentation_pipeline(image_size):
+    return A.Compose([
+        A.HorizontalFlip(p=0.5),
+        A.RandomBrightnessContrast(p=0.7),
+        A.HueSaturationValue(hue_shift_limit=20,
+                             sat_shift_limit=30, val_shift_limit=50, p=0.5),
+        A.Rotate(limit=50, p=0.7),  # Random rotation within ±50 degrees
+        # Crop to a fixed size
+        A.RandomCrop(width=int(image_size[0]*0.9),
+                     height=int(image_size[1]*0.9), p=0.5),
+        # Apply Gaussian blur, ensure blur_limit >= 3
+        A.GaussianBlur(blur_limit=3, p=0.5),
+        A.CoarseDropout(max_holes=30, max_height=5, max_width=5,
+                        min_holes=20, p=0.6),  # Coarse dropout
+        A.Resize(*image_size),
+        ToTensorV2()
+    ])
+
+
+def process_images_batch(batch_images, image_size, augment=False, num_augmented=5):
+    processed_images = []
+
+    for img_np in batch_images:
+        processed_image = process_images(
+            img_np, image_size, augment=augment, num_augmented=num_augmented
+        )
+        processed_images.append(processed_image)
+
+    # If augment is True, processed_image tensors have shape (num_augmented, C, H, W),
+    # so the final tensor should stack into (batch_size, num_augmented, C, H, W).
+    return torch.stack(processed_images)
+
+
+def process_images(img_np, image_size, augment=False, num_augmented=5):
+    images = []
+    augmentation_pipeline = get_augmentation_pipeline(
+        image_size) if augment else None
+
+    original_img = torch.tensor(img_np).permute(2, 0, 1).float()
+    if not augment:
+        return original_img
+
+    images.append(original_img)
+
+    # Generate augmented versions of the image
+    if augment and augmentation_pipeline:
+        for _ in range(num_augmented):
+            augmented_img = augmentation_pipeline(image=img_np)["image"]
+            images.append(augmented_img)
+
+    return torch.stack(images) if images else torch.empty(0)
+
+
+def read_images(image_list, data_path, image_size):
     images = []
     for image_name in image_list:
         img_path = os.path.join(data_path, image_name)
         if not os.path.exists(img_path):
             print(f"Warning: Image '{img_path}' not found. Skipping.")
             continue
+
+        # Load the original image
         img = Image.open(img_path).convert("RGB")
-        img = img.resize(image_size)
-        img_tensor = torch.tensor(np.array(img)).permute(
-            2, 0, 1).float() / 255.0  # Normalize to [0, 1]
-        images.append(img_tensor)
-    return torch.stack(images) if images else torch.empty(0)
+        img = img.resize(image_size, Image.LANCZOS)
+        img_np = np.array(img)  # Convert PIL Image to numpy array
+        images.append(img_np)
+    return images
 
 
 class Vocabulary:
@@ -200,10 +260,10 @@ def load_data(file_path, captions_path, data_path, image_size, test_size=0.1):
         )
 
         # Process training and validation data
-        train_images = process_images(
-            train_df["image"].tolist(), data_path, image_size)
-        val_images = process_images(
-            val_df["image"].tolist(), data_path, image_size)
+        train_images = read_images(
+            train_df["image"].tolist(), data_path, image_size=image_size)
+        val_images = read_images(
+            val_df["image"].tolist(), data_path, image_size=image_size)
 
         # Convert captions to numerical form
         train_captions = process_captions(
@@ -935,7 +995,7 @@ class WordEmbedding(nn.Module):
 def train_captioning_model(
     rnn_decoder, optimizer, data_dict,
     device='cuda', dtype=torch.float32, epochs=1, batch_size=256,
-    scheduler=None, val_perc=0.5,
+    scheduler=None, val_perc=0.5, image_size=(256, 256),
     verbose=True, checkpoint_path='./models/captioning_checkpoint.pth',
     history_path='./history/captioning_train_history.pkl', vocab_size=None
 ):
@@ -978,30 +1038,29 @@ def train_captioning_model(
 
         for j in range(num_batches):
             images = data_dict['train_images'][batch_size*j:batch_size*(j+1)]
+            num_aug = 5
+            images_torch = process_images_batch(
+                images, image_size=image_size, augment=True, num_augmented=num_aug).to(device=device, dtype=dtype)
             captions = data_dict['train_captions'][batch_size *
                                                    j:batch_size*(j+1)]
             for cap_idx in range(captions.shape[1]):
-                image = images.to(device=device, dtype=dtype)
                 caption = captions[:, cap_idx, :].to(device=device)
+                for ag in range(num_aug):
+                    loss = rnn_decoder(images_torch[:, ag, :, :], caption)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
 
-                # Forward pass through the CNN encoder and RNN decoder
-                loss = rnn_decoder(image, caption)
+                    if scheduler:
+                        scheduler.step()
 
-                # Backpropagation and optimization
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-                if scheduler:
-                    scheduler.step()
-
-                epoch_loss += loss.item()
+                    epoch_loss += loss.item()
 
             if verbose and j % 10 == 0:
                 print(
                     f"  Batch {j+1}/{num_batches}, Loss = {loss.item():.4f}")
 
-        avg_loss = epoch_loss / (num_batches*captions.shape[1])
+        avg_loss = epoch_loss / (num_aug*num_batches*captions.shape[1])
         train_loss_history.append(avg_loss)
 
         print(f"  Training Loss: {avg_loss:.4f}")
@@ -1013,13 +1072,14 @@ def train_captioning_model(
             for j in range(num_batches_val):
                 images = data_dict['val_images'][val_batch_size *
                                                  j:val_batch_size*(j+1)]
+                images_torch = process_images_batch(
+                    images, image_size=image_size, augment=False).to(device=device, dtype=dtype)
                 captions = data_dict['val_captions'][val_batch_size *
                                                      j:val_batch_size*(j+1)]
                 for cap_idx in range(captions.shape[1]):
-                    image = images.to(device=device, dtype=dtype)
                     caption = captions[:, cap_idx, :].to(device=device)
 
-                    loss = rnn_decoder(image, caption)
+                    loss = rnn_decoder(images_torch, caption)
 
                     val_loss += loss.item()
 
