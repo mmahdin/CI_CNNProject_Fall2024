@@ -270,10 +270,6 @@ def train_model(
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            if scheduler:
-                scheduler.step()
-                current_lr = optimizer.param_groups[0]['lr']
-                lr_history.append(current_lr)
 
             _, preds = scores.max(1)
             all_preds.extend(preds.cpu().numpy())
@@ -285,6 +281,10 @@ def train_model(
 
             if verbose and batch_idx % 100 == 0:
                 print(f"  Batch {batch_idx}, Loss = {loss.item():.4f}")
+        if scheduler:
+            scheduler.step()
+            current_lr = optimizer.param_groups[0]['lr']
+            lr_history.append(current_lr)
 
         avg_loss = epoch_loss / len(loader_train)
         train_metrics_history['loss'].append(avg_loss)
