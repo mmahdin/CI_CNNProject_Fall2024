@@ -16,6 +16,7 @@ import string
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from PIL import Image
+import matplotlib.pyplot as plt
 
 N_P = 4
 
@@ -755,8 +756,6 @@ class CaptioningRNN(nn.Module):
                  ignore_index=None, dtype=torch.float32):
         """
         Construct a new CaptioningRNN instance.
-ear(input_dim, hidden_dim).to(device=device, dtype=dtype),
-            nn.Dro
         Inputs:
         - word_to_idx: A dictionary giving the vocabulary. It contains V entries,
           and maps each string to a unique integer in the range [0, V).
@@ -1137,17 +1136,22 @@ def attention_visualizer(img, attn_weights, token):
     C, H, W = img.shape
     assert C == 3, 'We only support image with three color channels!'
 
-    # Reshape attention map
-    attn_weights = cv2.resize(attn_weights.data.numpy().copy(),
-                              (H, W), interpolation=cv2.INTER_NEAREST)
-    attn_weights = np.repeat(np.expand_dims(attn_weights, axis=2), 3, axis=2)
+    # Resize the attention weights to match the image dimensions
+    attn_weights_resized = cv2.resize(
+        attn_weights.data.numpy().copy(), (W, H), interpolation=cv2.INTER_NEAREST)
 
-    # Combine image and attention map
-    img_copy = img.permute(1, 2, 0).numpy()[
-        :, :, ::-1].copy()  # covert to BGR for cv2
-    masked_img = cv2.addWeighted(attn_weights, 0.5, img_copy, 0.5, 0)
-    img_copy = np.concatenate((np.zeros((25, W, 3)),
-                               masked_img), axis=0)
+    # Normalize the resized attention weights to range [0, 1]
+    attn_weights_normalized = (attn_weights_resized - attn_weights_resized.min()) / (
+        attn_weights_resized.max() - attn_weights_resized.min())
+
+    # Convert the normalized attention weights to a 3D array by duplicating across the color channels
+    attn_weights_3d = np.stack([attn_weights_normalized] * 3, axis=-1)
+
+    # Combine the image and attention map
+    img_copy = img.float().div(255.).permute(1, 2, 0).numpy()[
+        :, :, ::-1].copy()  # Convert to BGR for cv2
+    masked_img = cv2.addWeighted(attn_weights_3d, 0.5, img_copy, 0.5, 0)
+    img_copy = np.concatenate((np.zeros((25, W, 3)), masked_img), axis=0)
 
     # Add text
     cv2.putText(img_copy, '%s' % (token), (10, 15),
