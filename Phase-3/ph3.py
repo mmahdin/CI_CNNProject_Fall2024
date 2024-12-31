@@ -109,15 +109,15 @@ class FeatureExtractor(object):
 def get_augmentation_pipeline(image_size):
     return A.Compose([
         A.HorizontalFlip(p=0.5),
-        A.RandomBrightnessContrast(p=0.7),
-        A.HueSaturationValue(hue_shift_limit=20,
-                             sat_shift_limit=30, val_shift_limit=50, p=0.5),
+        # A.RandomBrightnessContrast(p=0.7),
+        # A.HueSaturationValue(hue_shift_limit=20,
+        #                      sat_shift_limit=30, val_shift_limit=50, p=0.5),
         A.Rotate(limit=50, p=0.7),  # Random rotation within ±50 degrees
         # Crop to a fixed size
         A.RandomCrop(width=int(image_size[0]*0.9),
                      height=int(image_size[1]*0.9), p=0.5),
         # Apply Gaussian blur, ensure blur_limit >= 3
-        A.GaussianBlur(blur_limit=3, p=0.5),
+        # A.GaussianBlur(blur_limit=3, p=0.5),
         A.CoarseDropout(max_holes=15, max_height=3, max_width=3,
                         min_holes=5, p=0.6),  # Coarse dropout
         A.Resize(*image_size),
@@ -821,7 +821,7 @@ class CaptioningRNN(nn.Module):
         nn.init.kaiming_normal_(self.temporal_affine_l.weight)
         nn.init.zeros_(self.temporal_affine_l.bias)
 
-    def forward(self, images, captions):
+    def forward(self, images, captions, cap_idx):
         """
         Compute training-time loss for the RNN. We input images and
         ground-truth captions for those images, and use an RNN (or LSTM) to compute
@@ -841,8 +841,8 @@ class CaptioningRNN(nn.Module):
         # by one relative to each other because the RNN should produce word (t+1)
         # after receiving word t. The first element of captions_in will be the START
         # token, and the first element of captions_out will be the first word.
-        captions_in = captions[:, :-1]  # N x T
-        captions_out = captions[:, 1:]
+        captions_in = captions[:, cap_idx, :][:, :-1]
+        captions_out = captions[:, :, 1:]
 
         loss = 0.0
 
@@ -859,7 +859,7 @@ class CaptioningRNN(nn.Module):
         x = self.word_embed(captions_in)  # N x T x wordvec_dim
         h = self.rnn(x, h0)  # N x T x H
         score = self.temporal_affine(h)  # N x T x V
-        loss = temporal_softmax_loss(
+        loss = temporal_softmax_loss_min(
             score, captions_out, ignore_index=self._null)
 
         return loss
@@ -934,39 +934,44 @@ class CaptioningRNN(nn.Module):
             return captions
 
 
-def temporal_softmax_loss(x, y, ignore_index=None):
+def temporal_softmax_loss_min(x, y, ignore_index=None):
     """
-    A temporal version of softmax loss for use in RNNs. We assume that we are
-    making predictions over a vocabulary of size V for each timestep of a
-    timeseries of length T, over a minibatch of size N. The input x gives scores
-    for all vocabulary elements at all timesteps, and y gives the indices of the
-    ground-truth element at each timestep. We use a cross-entropy loss at each
-    timestep, *summing* the loss over all timesteps and *averaging* across the
-    minibatch.
-
-    As an additional complication, we may want to ignore the model output at some
-    timesteps, since sequences of different length may have been combined into a
-    minibatch and padded with NULL tokens. The optional ignore_index argument
-    tells us which elements in the caption should not contribute to the loss.
+    A temporal version of softmax loss that computes the minimum loss over multiple
+    ground-truth captions for each sequence in the batch.
 
     Inputs:
     - x: Input scores, of shape (N, T, V)
-    - y: Ground-truth indices, of shape (N, T) where each element is in the range
-         0 <= y[i, t] < V
+    - y: Ground-truth indices, of shape (N, m, T), where m is the number of captions,
+         and each element is in the range 0 <= y[i, :, t] < V or ignore_index.
+    - ignore_index: Integer specifying which targets should be ignored.
 
-    Returns a tuple of:
-    - loss: Scalar giving loss
+    Returns:
+    - loss: Scalar giving the average minimum loss across the batch.
     """
-    loss = None
-
     N, T, V = x.shape
-    x_flat = x.reshape(N*T, V)
-    y_flat = y.reshape(N*T)
-    loss = F.cross_entropy(
-        x_flat, y_flat, ignore_index=ignore_index, reduction='sum')
-    loss = loss / N
+    _, m, _ = y.shape
 
-    return loss
+    # Reshape x for loss computation
+    x_flat = x.reshape(N * T, V)
+
+    # Initialize minimum losses for each sequence
+    min_losses = torch.full((N,), float('inf'), device=x.device)
+
+    for i in range(m):
+        # Extract the i-th ground-truth caption
+        y_flat = y[:, i, :].reshape(N * T)
+
+        # Compute the loss for this ground-truth caption
+        loss = F.cross_entropy(
+            x_flat, y_flat, ignore_index=ignore_index, reduction='none')
+        # Sum loss over timesteps for each sequence
+        loss = loss.reshape(N, T).sum(dim=1)
+
+        # Update the minimum loss for each sequence
+        min_losses = torch.minimum(min_losses, loss)
+
+    # Average the minimum loss across the batch
+    return min_losses.mean()
 
 
 class WordEmbedding(nn.Module):
@@ -1058,8 +1063,8 @@ def train_captioning_model(
                                                    j:batch_size*(j+1)]
             for ag in range(num_aug):
                 cap_idx = random.randint(0, captions.shape[1])-1
-                caption = captions[:, cap_idx, :].to(device=device)
-                loss = rnn_decoder(images_torch[:, ag, :, :], caption)
+                loss = rnn_decoder(
+                    images_torch[:, ag, :, :], captions.to(device=device), cap_idx)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -1089,9 +1094,8 @@ def train_captioning_model(
                 captions = data_dict['val_captions'][val_batch_size *
                                                      j:val_batch_size*(j+1)]
                 for cap_idx in range(captions.shape[1]):
-                    caption = captions[:, cap_idx, :].to(device=device)
-
-                    loss = rnn_decoder(images_torch, caption)
+                    loss = rnn_decoder(
+                        images_torch, captions.to(device=device), cap_idx)
 
                     val_loss += loss.item()
 
