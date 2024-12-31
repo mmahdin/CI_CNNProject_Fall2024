@@ -27,14 +27,14 @@ N_P = 4
 
 class FeatureExtractor(object):
     """
-    Image feature extraction with ResNet50.
+    Image feature extraction with EfficientNet.
     """
 
     def __init__(self, pooling=False, verbose=False, device='cuda', dtype=torch.float32):
         import torch
         import torch.nn as nn
         from torchvision import transforms, models
-        from torchvision.models import ResNet50_Weights
+        from torchvision.models import EfficientNet_B0_Weights
 
         self.preprocess = transforms.Compose([
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
@@ -43,27 +43,28 @@ class FeatureExtractor(object):
         self.device, self.dtype = device, dtype
         self.pooling = pooling
 
-        # Load ResNet50 with pretrained weights
-        self.resnet = models.resnet50(
-            weights=ResNet50_Weights.IMAGENET1K_V1).to(device)
+        # Load EfficientNet_B0 with pretrained weights
+        self.efficientnet = models.efficientnet_b0(
+            weights=EfficientNet_B0_Weights.IMAGENET1K_V1).to(device)
 
-        # Remove the last layers (avgpool and fc) to retain spatial features
-        self.resnet = nn.Sequential(*list(self.resnet.children())[:-2])
+        # Remove the classifier head to retain spatial features
+        self.efficientnet = nn.Sequential(
+            *list(self.efficientnet.children())[:-2])
 
         # If pooling is applied, add global average pooling
         if pooling:
-            self.resnet.add_module(
+            self.efficientnet.add_module(
                 'GlobalAvgPool', nn.AdaptiveAvgPool2d((1, 1)))
 
-        self.resnet.eval()
+        self.efficientnet.eval()
 
-    def extract_resnet_feature(self, img, verbose=False):
+    def extract_feature(self, img, verbose=False):
         """
         Inputs:
         - img: Batch of resized images, of shape N x 3 x H x W (e.g., 224 x 224)
 
         Outputs:
-        - feat: Image feature, of shape N x 2048 (if pooling is applied) or N x 2048 x 4 x 4 (if not applied)
+        - feat: Image feature, of shape N x 1280 (if pooling is applied) or N x 1280 x 7 x 7 (if not applied)
         """
         import math
         import torch.nn.functional as F
@@ -83,14 +84,14 @@ class FeatureExtractor(object):
             process_batch = 500
             for b in range(math.ceil(num_img / process_batch)):
                 # Pass the batch through the model
-                output = self.resnet(
+                output = self.efficientnet(
                     img_prepro[b * process_batch:(b + 1) * process_batch])
                 feat.append(output)
             feat = torch.cat(feat)
 
             # If pooling is applied, flatten the output
             if self.pooling:
-                feat = feat.view(feat.size(0), -1)  # N x 2048
+                feat = feat.view(feat.size(0), -1)  # N x 1280
 
             # Add L2 normalization
             feat = F.normalize(feat.view(feat.size(0), -1),
@@ -846,7 +847,8 @@ class CaptioningRNN(nn.Module):
 
         loss = 0.0
 
-        feature = self.feat_extract.extract_resnet_feature(images)  # N x 1280
+        feature = self.feat_extract.extract_feature(images)  # N x 1280
+
         if self.cell_type == 'attention':
             # make it N * 4 * 4 * input_dim
             feature = feature.permute(0, 2, 3, 1)
@@ -895,7 +897,7 @@ class CaptioningRNN(nn.Module):
             attn_weights_all = images.new(
                 N, max_length, N_P, N_P).fill_(0).float()
 
-        feature = self.feat_extract.extract_resnet_feature(images)
+        feature = self.feat_extract.extract_feature(images)
         A = None
         if self.cell_type == 'attention':
             # make it N * 4 * 4 * input_dim
@@ -954,8 +956,7 @@ def temporal_softmax_loss_min(x, y, ignore_index=None):
     # Reshape x for loss computation
     x_flat = x.reshape(N * T, V)
 
-    # Initialize minimum losses for each sequence
-    min_losses = torch.full((N,), float('inf'), device=x.device)
+    min_loss = float('inf')
 
     for i in range(m):
         # Extract the i-th ground-truth caption
@@ -963,15 +964,16 @@ def temporal_softmax_loss_min(x, y, ignore_index=None):
 
         # Compute the loss for this ground-truth caption
         loss = F.cross_entropy(
-            x_flat, y_flat, ignore_index=ignore_index, reduction='none')
-        # Sum loss over timesteps for each sequence
-        loss = loss.reshape(N, T).sum(dim=1)
+            x_flat, y_flat, ignore_index=ignore_index, reduction='sum'
+        )
+        loss = loss / N
 
-        # Update the minimum loss for each sequence
-        min_losses = torch.minimum(min_losses, loss)
+        # Update the minimum loss if the current loss is smaller
+        if loss < min_loss:
+            min_loss = loss
 
     # Average the minimum loss across the batch
-    return min_losses.mean()
+    return min_loss
 
 
 class WordEmbedding(nn.Module):
@@ -1093,13 +1095,12 @@ def train_captioning_model(
                     images, image_size=image_size, augment=False).to(device=device, dtype=dtype)
                 captions = data_dict['val_captions'][val_batch_size *
                                                      j:val_batch_size*(j+1)]
-                for cap_idx in range(captions.shape[1]):
-                    loss = rnn_decoder(
-                        images_torch, captions.to(device=device), cap_idx)
+                cap_idx = random.randint(0, captions.shape[1])-1
+                loss = rnn_decoder(
+                    images_torch, captions.to(device=device), cap_idx)
+                val_loss += loss.item()
 
-                    val_loss += loss.item()
-
-        avg_val_loss = val_loss / (num_batches_val*captions.shape[1])
+        avg_val_loss = val_loss / (num_batches_val)
         val_loss_history.append(avg_val_loss)
 
         print(f"  Validation Loss: {avg_val_loss:.4f}")
