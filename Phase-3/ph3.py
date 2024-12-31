@@ -1065,14 +1065,13 @@ def train_captioning_model(
                 loss.backward()
                 optimizer.step()
 
-                if scheduler:
-                    scheduler.step()
-
                 epoch_loss += loss.item()
 
             if verbose and j % 10 == 0:
                 print(
                     f"  Batch {j+1}/{num_batches}, Loss = {loss.item():.4f}")
+        if scheduler:
+            scheduler.step()
 
         avg_loss = epoch_loss / (num_aug*num_batches)
         train_loss_history.append(avg_loss)
