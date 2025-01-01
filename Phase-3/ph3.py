@@ -184,7 +184,7 @@ class Vocabulary:
 
     def build_vocab(self, captions, min_freq=1):
         self.counter.update(
-            word for caption_list in captions for caption in caption_list for word in caption.split())
+            word for caption in captions for word in caption.split())
         for token, freq in self.counter.items():
             if freq >= min_freq:
                 self.idx_to_token.append(token)
@@ -226,26 +226,37 @@ def preprocess_text(text):
     return text
 
 
-def load_data(file_path, captions_path, data_path, image_size, test_size=0.1):
-    if os.path.exists(file_path):
-        dataset = torch.load(file_path)
+def load_data(file_path, captions_path, data_path, image_size, test_size=0.1, flicker='8k'):
+    if os.path.exists(file_path[flicker]):
+        dataset = torch.load(file_path[flicker])
         print("Dataset loaded successfully.")
         return dataset
     else:
         print(
-            f"The file '{file_path}' does not exist. Creating a new dataset...")
+            f"The file '{file_path[flicker]}' does not exist. Creating a new dataset...")
 
-        # Load and parse captions
-        captions_data = []
-        with open(captions_path, "r") as f:
+        flicker8k = []
+        with open(captions_path['8k'], "r") as f:
             for line in f:
                 try:
                     image_id, caption = line.strip().split(",", 1)
-                    captions_data.append((image_id, caption.strip()))
+                    flicker8k.append((image_id, caption.strip()))
                 except ValueError:
                     print(f"Skipping malformed line: {line.strip()}")
                     continue
 
+        flicker30k = []
+        with open(captions_path['30k'], 'r') as file:
+            for line in file:
+                parts = line.strip().split('|')
+                if len(parts) == 3:
+                    image, _, caption = parts
+                    flicker30k.append((image.strip(), caption.strip()))
+
+        if flicker == '8k':
+            captions_data = flicker8k
+        else:
+            captions_data = flicker30k
         # Convert to DataFrame
         captions_df = pd.DataFrame(captions_data, columns=["image", "caption"])
 
@@ -266,20 +277,20 @@ def load_data(file_path, captions_path, data_path, image_size, test_size=0.1):
             grouped_captions, test_size=test_size, random_state=42)
 
         vocab = Vocabulary()
-        vocab.build_vocab(train_df["caption"].tolist())
+        vocab.build_vocab([preprocess_text(caption)
+                          for _, caption in flicker8k])
 
         # Find the maximum caption length
         max_caption_length = max(
-            len(vocab.numericalize(caption))
-            for caption_list in train_df["caption"]
-            for caption in caption_list
+            len(vocab.numericalize(preprocess_text(caption)))
+            for _, caption in flicker8k
         )
 
         # Process training and validation data
         train_images = read_images(
-            train_df["image"].tolist(), data_path, image_size=image_size)
+            train_df["image"].tolist(), data_path[flicker], image_size=image_size)
         val_images = read_images(
-            val_df["image"].tolist(), data_path, image_size=image_size)
+            val_df["image"].tolist(), data_path[flicker], image_size=image_size)
 
         # Convert captions to numerical form
         train_captions = process_captions(
@@ -301,7 +312,7 @@ def load_data(file_path, captions_path, data_path, image_size, test_size=0.1):
         }
 
         # Save the dataset for future use
-        torch.save(dataset, file_path)
+        torch.save(dataset, file_path[flicker])
         print("Dataset created successfully.")
         return dataset
 
