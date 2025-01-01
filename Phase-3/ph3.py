@@ -1072,22 +1072,25 @@ def train_captioning_model(
                                                    j:batch_size*(j+1)]
             bc_loss = 0
             for ag in range(num_aug):
-                for cap_idx in range(captions.shape[1]):
-                    caption = captions[:, cap_idx, :].to(device=device)
-                    loss = rnn_decoder(images_torch[:, ag, :, :], caption)
-                    optimizer.zero_grad()
-                    loss.backward()
-                    optimizer.step()
-                    bc_loss += loss.item()
-                    epoch_loss += loss.item()
+                cap_idx = random.randint(0, captions.shape[1])-1
+                caption = captions[:, cap_idx, :].to(device=device)
+                loss = rnn_decoder(images_torch[:, ag, :, :], caption)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                if scheduler:
+                    scheduler.step()
+                bc_loss += loss.item()
+                epoch_loss += loss.item()
 
             if verbose and j % 10 == 0:
                 print(
-                    f"  Batch {j+1}/{num_batches}, Loss = {bc_loss/(num_aug*captions.shape[1]):.4f}")
+                    f"  Batch {j+1}/{num_batches}, Loss = {bc_loss/(num_aug):.4f}")
         if scheduler:
             scheduler.step()
 
-        avg_loss = epoch_loss / (num_aug*num_batches*captions.shape[1])
+        avg_loss = epoch_loss / (num_aug*num_batches)
         train_loss_history.append(avg_loss)
 
         print(f"  Training Loss: {avg_loss:.4f}")
