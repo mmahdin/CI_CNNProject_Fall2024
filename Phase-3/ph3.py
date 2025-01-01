@@ -273,6 +273,8 @@ def load_data(file_path, captions_path, data_path, image_size, test_size=0.1, fl
             len) == 5]
 
         # Split into train and validation sets
+        if flicker == '30k':
+            test_size = 0.01
         train_df, val_df = train_test_split(
             grouped_captions, test_size=test_size, random_state=42)
 
@@ -833,7 +835,7 @@ class CaptioningRNN(nn.Module):
         nn.init.kaiming_normal_(self.temporal_affine_l.weight)
         nn.init.zeros_(self.temporal_affine_l.bias)
 
-    def forward(self, images, captions, cap_idx):
+    def forward(self, images, captions):
         """
         Compute training-time loss for the RNN. We input images and
         ground-truth captions for those images, and use an RNN (or LSTM) to compute
@@ -853,8 +855,8 @@ class CaptioningRNN(nn.Module):
         # by one relative to each other because the RNN should produce word (t+1)
         # after receiving word t. The first element of captions_in will be the START
         # token, and the first element of captions_out will be the first word.
-        captions_in = captions[:, cap_idx, :][:, :-1]
-        captions_out = captions[:, :, 1:]
+        captions_in = captions[:, :-1]  # N x T
+        captions_out = captions[:, 1:]
 
         loss = 0.0
 
@@ -872,7 +874,7 @@ class CaptioningRNN(nn.Module):
         x = self.word_embed(captions_in)  # N x T x wordvec_dim
         h = self.rnn(x, h0)  # N x T x H
         score = self.temporal_affine(h)  # N x T x V
-        loss = temporal_softmax_loss_min(
+        loss = temporal_softmax_loss(
             score, captions_out, ignore_index=self._null)
 
         return loss
@@ -947,44 +949,39 @@ class CaptioningRNN(nn.Module):
             return captions
 
 
-def temporal_softmax_loss_min(x, y, ignore_index=None):
+def temporal_softmax_loss(x, y, ignore_index=None):
     """
-    A temporal version of softmax loss that computes the minimum loss over multiple
-    ground-truth captions for each sequence in the batch.
+    A temporal version of softmax loss for use in RNNs. We assume that we are
+    making predictions over a vocabulary of size V for each timestep of a
+    timeseries of length T, over a minibatch of size N. The input x gives scores
+    for all vocabulary elements at all timesteps, and y gives the indices of the
+    ground-truth element at each timestep. We use a cross-entropy loss at each
+    timestep, *summing* the loss over all timesteps and *averaging* across the
+    minibatch.
+
+    As an additional complication, we may want to ignore the model output at some
+    timesteps, since sequences of different length may have been combined into a
+    minibatch and padded with NULL tokens. The optional ignore_index argument
+    tells us which elements in the caption should not contribute to the loss.
 
     Inputs:
     - x: Input scores, of shape (N, T, V)
-    - y: Ground-truth indices, of shape (N, m, T), where m is the number of captions,
-         and each element is in the range 0 <= y[i, :, t] < V or ignore_index.
-    - ignore_index: Integer specifying which targets should be ignored.
+    - y: Ground-truth indices, of shape (N, T) where each element is in the range
+         0 <= y[i, t] < V
 
-    Returns:
-    - loss: Scalar giving the average minimum loss across the batch.
+    Returns a tuple of:
+    - loss: Scalar giving loss
     """
+    loss = None
+
     N, T, V = x.shape
-    _, m, _ = y.shape
+    x_flat = x.reshape(N*T, V)
+    y_flat = y.reshape(N*T)
+    loss = F.cross_entropy(
+        x_flat, y_flat, ignore_index=ignore_index, reduction='sum')
+    loss = loss / N
 
-    # Reshape x for loss computation
-    x_flat = x.reshape(N * T, V)
-
-    min_loss = float('inf')
-
-    for i in range(m):
-        # Extract the i-th ground-truth caption
-        y_flat = y[:, i, :].reshape(N * T)
-
-        # Compute the loss for this ground-truth caption
-        loss = F.cross_entropy(
-            x_flat, y_flat, ignore_index=ignore_index, reduction='sum'
-        )
-        loss = loss / N
-
-        # Update the minimum loss if the current loss is smaller
-        if loss < min_loss:
-            min_loss = loss
-
-    # Average the minimum loss across the batch
-    return min_loss
+    return loss
 
 
 class WordEmbedding(nn.Module):
@@ -1066,7 +1063,6 @@ def train_captioning_model(
         # Training phase
         rnn_decoder.train()
         epoch_loss = 0.0
-
         for j in range(num_batches):
             images = data_dict['train_images'][batch_size*j:batch_size*(j+1)]
             num_aug = 2
@@ -1074,23 +1070,24 @@ def train_captioning_model(
                 images, image_size=image_size, augment=True, num_augmented=num_aug).to(device=device, dtype=dtype)
             captions = data_dict['train_captions'][batch_size *
                                                    j:batch_size*(j+1)]
+            bc_loss = 0
             for ag in range(num_aug):
-                cap_idx = random.randint(0, captions.shape[1])-1
-                loss = rnn_decoder(
-                    images_torch[:, ag, :, :], captions.to(device=device), cap_idx)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-                epoch_loss += loss.item()
+                for cap_idx in range(captions.shape[1]):
+                    caption = captions[:, cap_idx, :].to(device=device)
+                    loss = rnn_decoder(images_torch[:, ag, :, :], caption)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                    bc_loss += loss.item()
+                    epoch_loss += loss.item()
 
             if verbose and j % 10 == 0:
                 print(
-                    f"  Batch {j+1}/{num_batches}, Loss = {loss.item():.4f}")
+                    f"  Batch {j+1}/{num_batches}, Loss = {bc_loss/(num_aug*captions.shape[1]):.4f}")
         if scheduler:
             scheduler.step()
 
-        avg_loss = epoch_loss / (num_aug*num_batches)
+        avg_loss = epoch_loss / (num_aug*num_batches*captions.shape[1])
         train_loss_history.append(avg_loss)
 
         print(f"  Training Loss: {avg_loss:.4f}")
@@ -1106,12 +1103,14 @@ def train_captioning_model(
                     images, image_size=image_size, augment=False).to(device=device, dtype=dtype)
                 captions = data_dict['val_captions'][val_batch_size *
                                                      j:val_batch_size*(j+1)]
-                cap_idx = random.randint(0, captions.shape[1])-1
-                loss = rnn_decoder(
-                    images_torch, captions.to(device=device), cap_idx)
-                val_loss += loss.item()
+                for cap_idx in range(captions.shape[1]):
+                    caption = captions[:, cap_idx, :].to(device=device)
 
-        avg_val_loss = val_loss / (num_batches_val)
+                    loss = rnn_decoder(images_torch, caption)
+
+                    val_loss += loss.item()
+
+        avg_val_loss = val_loss / (num_batches_val*captions.shape[1])
         val_loss_history.append(avg_val_loss)
 
         print(f"  Validation Loss: {avg_val_loss:.4f}")
