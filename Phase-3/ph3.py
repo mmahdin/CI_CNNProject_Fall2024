@@ -1065,7 +1065,7 @@ def train_captioning_model(
         epoch_loss = 0.0
         for j in range(num_batches):
             images = data_dict['train_images'][batch_size*j:batch_size*(j+1)]
-            num_aug = 2
+            num_aug = 1
             images_torch = process_images_batch(
                 images, image_size=image_size, augment=True, num_augmented=num_aug).to(device=device, dtype=dtype)
             captions = data_dict['train_captions'][batch_size *
@@ -1079,14 +1079,12 @@ def train_captioning_model(
                 loss.backward()
                 optimizer.step()
 
-                if scheduler:
-                    scheduler.step()
                 bc_loss += loss.item()
                 epoch_loss += loss.item()
 
             if verbose and j % 10 == 0:
                 print(
-                    f"  Batch {j+1}/{num_batches}, Loss = {bc_loss/(num_aug):.4f}")
+                    f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']}, Loss = {bc_loss/(num_aug):.4f}")
         if scheduler:
             scheduler.step()
 
