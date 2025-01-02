@@ -18,7 +18,7 @@ from albumentations.pytorch import ToTensorV2
 from PIL import Image
 import matplotlib.pyplot as plt
 
-N_P = 4
+N_P = 7
 
 #########################################################################
 #                           FeatureExtractor                            #
