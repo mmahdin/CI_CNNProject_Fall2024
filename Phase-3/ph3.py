@@ -605,9 +605,57 @@ class LSTM(nn.Module):
         return next_h, next_c
 
 
+class LSTMCellWithLNAndDropout(torch.nn.Module):
+    def __init__(self, D, H, use_ln=False, dropout=0.0):
+        super().__init__()
+        self.H = H
+        self.use_ln = use_ln
+        self.dropout = dropout
+
+        self.Wx = torch.nn.Parameter(torch.randn(D, 4 * H) * 0.01)
+        self.Wh = torch.nn.Parameter(torch.randn(H, 4 * H) * 0.01)
+        self.b = torch.nn.Parameter(torch.zeros(4 * H))
+
+        # Optional attention weights
+        self.Wattn = None
+
+        # Layer normalization layers (optional)
+        if use_ln:
+            self.ln = torch.nn.LayerNorm(4 * H)
+
+        # Dropout layer (optional)
+        self.do = torch.nn.Dropout(dropout)
+
+    def forward(self, x, prev_h, prev_c, attn=None):
+        """
+        Forward pass for a single timestep of an LSTM with optional LN and DO.
+        """
+        a = x.mm(self.Wx) + prev_h.mm(self.Wh) + self.b
+        if attn is not None and self.Wattn is not None:
+            a += attn.mm(self.Wattn)
+
+        # Apply layer normalization if enabled
+        if self.use_ln:
+            a = self.ln(a)
+
+        i = torch.sigmoid(a[:, :self.H])
+        f = torch.sigmoid(a[:, self.H:2*self.H])
+        o = torch.sigmoid(a[:, 2*self.H:3*self.H])
+        g = torch.tanh(a[:, 3*self.H:])
+
+        next_c = f * prev_c + i * g
+        next_h = o * torch.tanh(next_c)
+
+        # Apply dropout to the hidden state if enabled
+        if self.dropout > 0.0:
+            next_h = self.do(next_h)
+
+        return next_h, next_c
+
 #########################################################################
 #                               Attention LSTM                          #
 #########################################################################
+
 
 def dot_product_attention(prev_h, A):
     """
@@ -638,20 +686,16 @@ def dot_product_attention(prev_h, A):
     return attn, attn_weights
 
 
-def attention_forward(x, A, Wx, Wh, Wattn, b):
+def attention_forward(x, A, lstm_cell):
     """
     Inputs:
     - x: Input data, of shape (N, T, D)
     - A: **Projected** activation map, of shape (N, H, 4, 4)
-    - Wx: Weights for input-to-hidden connections, of shape (D, 4H)
-    - Wh: Weights for hidden-to-hidden connections, of shape (H, 4H)
-    - Wattn: Weights for attention-to-hidden connections, of shape (H, 4H)
-    - b: Biases, of shape (4H,)
+    - lstm_cell: Instance of LSTMCellWithLNAndDropout, initialized with required parameters
 
     Returns a tuple of:
     - h: Hidden states for all timesteps of all sequences, of shape (N, T, H)
     """
-
     h = None
 
     h0 = A.mean(dim=(2, 3))  # Initial hidden state, of shape (N, H)
@@ -664,8 +708,8 @@ def attention_forward(x, A, Wx, Wh, Wattn, b):
     prev_c = c0
     for i in range(T):
         attn, attn_weights = dot_product_attention(prev_h, A)
-        next_h, next_c = lstm_step_forward(
-            x[:, i, :], prev_h, prev_c, Wx, Wh, b, attn=attn, Wattn=Wattn)
+        # Use LSTMCellWithLNAndDropout
+        next_h, next_c = lstm_cell(x[:, i, :], prev_h, prev_c, attn=attn)
         prev_h = next_h
         prev_c = next_c
         h[:, i, :] = prev_h
@@ -675,61 +719,58 @@ def attention_forward(x, A, Wx, Wh, Wattn, b):
 
 class AttentionLSTM(nn.Module):
     """
-    This is our single-layer, uni-directional Attention module.
+    Single-layer, uni-directional Attention module.
 
     Arguments for initialization:
     - input_size: Input size, denoted as D before
     - hidden_size: Hidden size, denoted as H before
     """
 
-    def __init__(self, input_size, hidden_size, device='cpu',
-                 dtype=torch.float32):
+    def __init__(self, input_size, hidden_size, use_ln=False, dropout=0.0, device='cpu', dtype=torch.float32):
         """
-        Initialize a LSTM.
-        Model parameters to initialize:
-        - Wx: Weights for input-to-hidden connections, of shape (D, 4H)
-        - Wh: Weights for hidden-to-hidden connections, of shape (H, 4H)
-        - Wattn: Weights for attention-to-hidden connections, of shape (H, 4H)
-        - b: Biases, of shape (4H,)
+        Initialize the Attention LSTM.
+
+        Parameters:
+        - input_size: Size of the input (D).
+        - hidden_size: Size of the hidden state (H).
+        - use_ln: Whether to use Layer Normalization (default: False).
+        - dropout: Dropout probability (default: 0.0).
+        - device: Device to initialize tensors on.
+        - dtype: Data type for tensors.
         """
         super().__init__()
 
-        # Register parameters
-        self.Wx = Parameter(torch.randn(input_size, hidden_size*4,
-                                        device=device, dtype=dtype).div(math.sqrt(input_size)))
-        self.Wh = Parameter(torch.randn(hidden_size, hidden_size*4,
-                                        device=device, dtype=dtype).div(math.sqrt(hidden_size)))
-        self.Wattn = Parameter(torch.randn(hidden_size, hidden_size*4,
-                                           device=device, dtype=dtype).div(math.sqrt(hidden_size)))
-        self.b = Parameter(torch.zeros(hidden_size*4,
-                           device=device, dtype=dtype))
+        # Initialize LSTMCellWithLNAndDropout
+        self.lstm_cell = LSTMCellWithLNAndDropout(
+            input_size, hidden_size, use_ln=use_ln, dropout=dropout
+        ).to(device=device, dtype=dtype)
 
     def forward(self, x, A):
         """  
         Inputs:
-        - x: Input data for the entire timeseries, of shape (N, T, D)
-        - A: The projected CNN feature activation, of shape (N, H, 4, 4)
+        - x: Input data for the entire timeseries, of shape (N, T, D).
+        - A: The projected CNN feature activation, of shape (N, H, 4, 4).
 
         Outputs:
-        - hn: The hidden state output
+        - h: Hidden states for all timesteps, of shape (N, T, H).
         """
-        hn = attention_forward(x, A, self.Wx, self.Wh, self.Wattn, self.b)
-        return hn
+        h = attention_forward(x, A, self.lstm_cell)
+        return h
 
     def step_forward(self, x, prev_h, prev_c, attn):
         """
         Inputs:
-        - x: Input data for one time step, of shape (N, D)
-        - prev_h: The previous hidden state, of shape (N, H)
-        - prev_c: The previous cell state, of shape (N, H)
-        - attn: The attention embedding, of shape (N, H)
+        - x: Input data for one time step, of shape (N, D).
+        - prev_h: The previous hidden state, of shape (N, H).
+        - prev_c: The previous cell state, of shape (N, H).
+        - attn: The attention embedding, of shape (N, H).
 
         Outputs:
-        - next_h: The next hidden state, of shape (N, H)
-        - next_c: The next cell state, of shape (N, H)
+        - next_h: The next hidden state, of shape (N, H).
+        - next_c: The next cell state, of shape (N, H).
         """
-        next_h, next_c = lstm_step_forward(x, prev_h, prev_c, self.Wx, self.Wh,
-                                           self.b, attn=attn, Wattn=self.Wattn)
+        # Use LSTMCellWithLNAndDropout for step-wise computation
+        next_h, next_c = self.lstm_cell(x, prev_h, prev_c, attn=attn)
         return next_h, next_c
 
 
@@ -766,7 +807,7 @@ class CaptioningRNN(nn.Module):
     """
 
     def __init__(self, word_to_idx, input_dim=512, wordvec_dim=128,
-                 hidden_dim=128, cell_type='rnn', device='cpu', p=0.0,
+                 hidden_dim=128, cell_type='rnn', device='cpu', p=0.3,
                  ignore_index=None, dtype=torch.float32):
         """
         Construct a new CaptioningRNN instance.
@@ -819,7 +860,7 @@ class CaptioningRNN(nn.Module):
             self.feat_extract = FeatureExtractor(
                 pooling=False, device=device, dtype=dtype)
             self.rnn = AttentionLSTM(
-                wordvec_dim, hidden_dim, device=device, dtype=dtype)
+                wordvec_dim, hidden_dim, use_ln=True, dropout=0.3, device=device, dtype=dtype)
         else:
             raise ValueError
         nn.init.kaiming_normal_(self.affine_l.weight)
@@ -830,7 +871,7 @@ class CaptioningRNN(nn.Module):
             hidden_dim, vocab_size).to(device=device, dtype=dtype)
         self.temporal_affine = nn.Sequential(
             self.temporal_affine_l,
-            nn.Dropout(p=p)  # Adding dropout with a probability of 0.5
+            nn.Dropout(p=0.0)  # Adding dropout with a probability of 0.5
         )
         nn.init.kaiming_normal_(self.temporal_affine_l.weight)
         nn.init.zeros_(self.temporal_affine_l.bias)
@@ -1023,7 +1064,7 @@ class WordEmbedding(nn.Module):
 def train_captioning_model(
     rnn_decoder, optimizer, data_dict,
     device='cuda', dtype=torch.float32, epochs=1, batch_size=256,
-    scheduler=None, val_perc=0.5, image_size=(256, 256),
+    scheduler=None, val_perc=0.5, image_size=(256, 256), lr=None,
     verbose=True, checkpoint_path='./models/captioning_checkpoint.pth',
     history_path='./history/captioning_train_history.pkl', vocab_size=None
 ):
@@ -1048,6 +1089,10 @@ def train_captioning_model(
         checkpoint = torch.load(checkpoint_path)
         rnn_decoder.load_state_dict(checkpoint['model_state'])
         optimizer.load_state_dict(checkpoint['optimizer_state'])
+        # Change the learning rate
+        if lr:
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr
         if scheduler:
             scheduler.load_state_dict(checkpoint['scheduler_state'])
         start_epoch = checkpoint['epoch']
@@ -1065,7 +1110,7 @@ def train_captioning_model(
         epoch_loss = 0.0
         for j in range(num_batches):
             images = data_dict['train_images'][batch_size*j:batch_size*(j+1)]
-            num_aug = 1
+            num_aug = 2
             images_torch = process_images_batch(
                 images, image_size=image_size, augment=True, num_augmented=num_aug).to(device=device, dtype=dtype)
             captions = data_dict['train_captions'][batch_size *
