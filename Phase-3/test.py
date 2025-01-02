@@ -35,9 +35,13 @@ to_long_cuda = {'dtype': torch.long, 'device': 'cuda'}
 
 
 # Configuration
-image_size = (256, 256)
-data_paht = "./dataset/archive/images"
-captions_path = "./dataset/archive/captions.txt"
-data_dict_path = "./dataset/image_captioning_dataset.pt"
+image_size = (299, 299)
+flicker = '8k'
+data_dict_path = {'8k': "./dataset/image_captioning_dataset.pt",
+                  '30k': "./dataset/flicker30k.pt"}
+captions_path = {'8k': "./dataset/archive/captions.txt",
+                 '30k': "./dataset/captions.csv"}
+data_path = {'8k': "./dataset/archive/images/", '30k': "./dataset/flicker30k/"}
 
-data_dict = load_data(data_dict_path, captions_path, data_paht, image_size)
+data_dict = load_data(data_dict_path, captions_path,
+                      data_path, image_size, flicker=flicker)

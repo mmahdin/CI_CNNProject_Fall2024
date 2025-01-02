@@ -18,7 +18,7 @@ from albumentations.pytorch import ToTensorV2
 from PIL import Image
 import matplotlib.pyplot as plt
 
-N_P = 7
+N_P = 10
 
 #########################################################################
 #                           FeatureExtractor                            #
@@ -109,18 +109,18 @@ class FeatureExtractor(object):
 
 def get_augmentation_pipeline(image_size):
     return A.Compose([
-        A.HorizontalFlip(p=0.5),
+        A.HorizontalFlip(p=0.8),
         # A.RandomBrightnessContrast(p=0.7),
         # A.HueSaturationValue(hue_shift_limit=20,
         #                      sat_shift_limit=30, val_shift_limit=50, p=0.5),
-        A.Rotate(limit=50, p=0.7),  # Random rotation within ±50 degrees
+        A.Rotate(limit=40, p=0.8),  # Random rotation within ±50 degrees
         # Crop to a fixed size
         A.RandomCrop(width=int(image_size[0]*0.9),
-                     height=int(image_size[1]*0.9), p=0.5),
+                     height=int(image_size[1]*0.9), p=0.7),
         # Apply Gaussian blur, ensure blur_limit >= 3
         # A.GaussianBlur(blur_limit=3, p=0.5),
-        A.CoarseDropout(max_holes=15, max_height=3, max_width=3,
-                        min_holes=5, p=0.6),  # Coarse dropout
+        A.CoarseDropout(max_holes=30, max_height=5, max_width=5,
+                        min_holes=20, p=0.8),  # Coarse dropout
         A.Resize(*image_size),
         ToTensorV2()
     ])
@@ -1110,7 +1110,7 @@ def train_captioning_model(
         epoch_loss = 0.0
         for j in range(num_batches):
             images = data_dict['train_images'][batch_size*j:batch_size*(j+1)]
-            num_aug = 2
+            num_aug = 1
             images_torch = process_images_batch(
                 images, image_size=image_size, augment=True, num_augmented=num_aug).to(device=device, dtype=dtype)
             captions = data_dict['train_captions'][batch_size *
