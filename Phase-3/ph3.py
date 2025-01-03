@@ -17,6 +17,8 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from PIL import Image
 import matplotlib.pyplot as plt
+import re
+from transformers import BertModel, BertTokenizer
 
 N_P = 10
 
@@ -184,7 +186,7 @@ class Vocabulary:
 
     def build_vocab(self, captions, min_freq=1):
         self.counter.update(
-            word for caption in captions for word in caption.split())
+            word for caption_list in captions for caption in caption_list for word in caption.split())
         for token, freq in self.counter.items():
             if freq >= min_freq:
                 self.idx_to_token.append(token)
@@ -219,14 +221,16 @@ def process_captions(captions_list, vocab, max_caption_length):
 def preprocess_text(text):
     # Remove punctuation
     text = text.translate(str.maketrans("", "", string.punctuation))
+    # Remove special characters and numbers
+    text = re.sub(r'[^a-zA-Z\s]', '', text)
     # Convert to lowercase
     text = text.lower()
-    # Optionally, add more cleaning steps (e.g., remove extra spaces)
+    # Remove extra spaces
     text = " ".join(text.split())
     return text
 
 
-def load_data(file_path, captions_path, data_path, image_size, test_size=0.1, flicker='8k'):
+def load_data(file_path, captions_path, data_path, image_size, test_size=0.125, flicker='8k'):
     if os.path.exists(file_path[flicker]):
         dataset = torch.load(file_path[flicker])
         print("Dataset loaded successfully.")
@@ -245,13 +249,16 @@ def load_data(file_path, captions_path, data_path, image_size, test_size=0.1, fl
                     print(f"Skipping malformed line: {line.strip()}")
                     continue
 
-        flicker30k = []
-        with open(captions_path['30k'], 'r') as file:
-            for line in file:
-                parts = line.strip().split('|')
-                if len(parts) == 3:
-                    image, _, caption = parts
-                    flicker30k.append((image.strip(), caption.strip()))
+        try:
+            flicker30k = []
+            with open(captions_path['30k'], 'r') as file:
+                for line in file:
+                    parts = line.strip().split('|')
+                    if len(parts) == 3:
+                        image, _, caption = parts
+                        flicker30k.append((image.strip(), caption.strip()))
+        except:
+            pass
 
         if flicker == '8k':
             captions_data = flicker8k
@@ -279,13 +286,13 @@ def load_data(file_path, captions_path, data_path, image_size, test_size=0.1, fl
             grouped_captions, test_size=test_size, random_state=42)
 
         vocab = Vocabulary()
-        vocab.build_vocab([preprocess_text(caption)
-                          for _, caption in flicker8k])
+        vocab.build_vocab(train_df["caption"].tolist())
 
         # Find the maximum caption length
         max_caption_length = max(
-            len(vocab.numericalize(preprocess_text(caption)))
-            for _, caption in flicker8k
+            len(vocab.numericalize(caption))
+            for caption_list in train_df["caption"]
+            for caption in caption_list
         )
 
         # Process training and validation data
@@ -807,7 +814,7 @@ class CaptioningRNN(nn.Module):
     """
 
     def __init__(self, word_to_idx, input_dim=512, wordvec_dim=128,
-                 hidden_dim=128, cell_type='rnn', device='cpu', p=0.3,
+                 hidden_dim=128, cell_type='rnn', device='cpu', p=0.4,
                  ignore_index=None, dtype=torch.float32):
         """
         Construct a new CaptioningRNN instance.
@@ -860,13 +867,12 @@ class CaptioningRNN(nn.Module):
             self.feat_extract = FeatureExtractor(
                 pooling=False, device=device, dtype=dtype)
             self.rnn = AttentionLSTM(
-                wordvec_dim, hidden_dim, use_ln=True, dropout=0.3, device=device, dtype=dtype)
+                wordvec_dim, hidden_dim, use_ln=True, dropout=0.4, device=device, dtype=dtype)
         else:
             raise ValueError
         nn.init.kaiming_normal_(self.affine_l.weight)
         nn.init.zeros_(self.affine_l.bias)
-        self.word_embed = WordEmbedding(
-            vocab_size, wordvec_dim, device=device, dtype=dtype)
+        self.word_embed = BERTEmbedding(device=device)
         self.temporal_affine_l = nn.Linear(
             hidden_dim, vocab_size).to(device=device, dtype=dtype)
         self.temporal_affine = nn.Sequential(
@@ -911,83 +917,68 @@ class CaptioningRNN(nn.Module):
 
         if self.cell_type == 'attention':
             h0 = h0.permute(0, 3, 1, 2)  # permute back (N, H, 4, 4)
+        # Convert captions_in indices to words using the custom vocabulary
+        captions_in_words = [
+            " ".join([self.idx_to_word[idx]
+                     for idx in seq if idx != self._null])
+            for seq in captions_in.tolist()
+        ]
 
-        x = self.word_embed(captions_in)  # N x T x wordvec_dim
-        h = self.rnn(x, h0)  # N x T x H
-        score = self.temporal_affine(h)  # N x T x V
+        # Tokenize captions using BERT's tokenizer
+        max_length = captions_in.shape[1]  # Ensure consistent token length
+        inputs = self.word_embed.tokenizer(
+            captions_in_words, return_tensors="pt", padding="max_length", truncation=True, max_length=max_length
+        )
+        inputs = {key: value.to(self.word_embed.device)
+                  for key, value in inputs.items()}
+
+        # Get BERT embeddings
+        bert_embeddings = self.word_embed.bert(
+            **inputs).last_hidden_state  # N x T x H_bert
+
+        # Pass embeddings through RNN
+        h = self.rnn(bert_embeddings, h0)  # N x T x hidden_dim
+
+        # Compute scores and loss
+        scores = self.temporal_affine(h)  # N x T x V
         loss = temporal_softmax_loss(
-            score, captions_out, ignore_index=self._null)
+            scores, captions_out, ignore_index=self._null)
 
         return loss
 
     def sample(self, images, max_length=15):
-        """
-        Run a test-time forward pass for the model, sampling captions for input
-        feature vectors.
-
-        At each timestep, we embed the current word, pass it and the previous hidden
-        state to the RNN to get the next hidden state, use the hidden state to get
-        scores for all vocab words, and choose the word with the highest score as
-        the next word. The initial hidden state is computed by applying an affine
-        transform to the image features, and the initial word is the <START>
-        token.
-
-        For LSTMs you will also have to keep track of the cell state; in that case
-        the initial cell state should be zero.
-
-        Inputs:
-        - images: Input images, of shape (N, 3, 112, 112)
-        - max_length: Maximum length T of generated captions
-
-        Returns:
-        - captions: Array of shape (N, max_length) giving sampled captions,
-          where each element is an integer in the range [0, V). The first element
-          of captions should be the first sampled word, not the <START> token.
-        """
         N = images.shape[0]
-        captions = self._null * images.new(N, max_length).fill_(1).long()
-
-        if self.cell_type == 'attention':
-            attn_weights_all = images.new(
-                N, max_length, N_P, N_P).fill_(0).float()
+        captions = self._null * \
+            torch.ones(N, max_length, dtype=torch.long, device=self.device)
 
         feature = self.feat_extract.extract_feature(images)
-        A = None
         if self.cell_type == 'attention':
-            # make it N * 4 * 4 * input_dim
             feature = feature.permute(0, 2, 3, 1)
         prev_h = self.affine(feature)
         prev_c = torch.zeros_like(prev_h)
         if self.cell_type == 'attention':
-            A = prev_h.permute(0, 3, 1, 2)  # permute back
+            A = prev_h.permute(0, 3, 1, 2)
             prev_h = A.mean(dim=(2, 3))
             prev_c = A.mean(dim=(2, 3))
 
-        x = torch.ones((N, self.wordvec_dim), dtype=prev_h.dtype,
-                       device=prev_h.device) * self.word_embed(self._start).reshape(1, -1)
+        tokens = ["<start>"] * N
         for i in range(max_length):
-            next_h = None
+            x = self.word_embed(tokens)
             if self.cell_type == 'rnn':
                 next_h = self.rnn.step_forward(x, prev_h)
             elif self.cell_type == 'lstm':
                 next_h, prev_c = self.rnn.step_forward(x, prev_h, prev_c)
             else:
                 attn, attn_weights = dot_product_attention(prev_h, A)
-                attn_weights_all[:, i] = attn_weights
                 next_h, prev_c = self.rnn.step_forward(x, prev_h, prev_c, attn)
 
             score = self.temporal_affine(next_h)
-            # loss = temporal_softmax_loss(score, captions_out, ignore_index=self._null)
-            max_idx = torch.argmax(score, dim=1)
-            captions[:, i] = max_idx
-            x = self.word_embed(max_idx)
-            # print(x.shape)
+            tokens = [self.idx_to_word[token]
+                      for token in torch.argmax(score, dim=1).tolist()]
+            captions[:, i] = tokens
             prev_h = next_h
 
-        if self.cell_type == 'attention':
-            return captions, attn_weights_all.cpu()
-        else:
-            return captions
+        return captions
 
 
 def temporal_softmax_loss(x, y, ignore_index=None):
@@ -1055,6 +1046,21 @@ class WordEmbedding(nn.Module):
 
         return out
 
+
+class BERTEmbedding(nn.Module):
+    def __init__(self, pretrained_model_name='bert-base-uncased', device='cpu'):
+        super().__init__()
+        self.tokenizer = BertTokenizer.from_pretrained(pretrained_model_name)
+        self.bert = BertModel.from_pretrained(pretrained_model_name).to(device)
+        self.device = device
+
+    def forward(self, captions):
+        # Tokenize and convert to tensors
+        inputs = self.tokenizer(
+            captions, return_tensors="pt", padding=True, truncation=True)
+        inputs = {key: value.to(self.device) for key, value in inputs.items()}
+        outputs = self.bert(**inputs)
+        return outputs.last_hidden_state  # Use the last hidden state as embeddings
 
 #########################################################################
 #                                  Train                                #
@@ -1127,7 +1133,7 @@ def train_captioning_model(
                 bc_loss += loss.item()
                 epoch_loss += loss.item()
 
-            if verbose and j % 10 == 0:
+            if verbose and j % 50 == 0:
                 print(
                     f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']}, Loss = {bc_loss/(num_aug):.4f}")
         if scheduler:

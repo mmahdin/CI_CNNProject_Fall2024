@@ -1,3 +1,4 @@
+import kagglehub
 from google.colab import drive
 import os
 import zipfile
@@ -51,6 +52,65 @@ with zipfile.ZipFile(zip_file_path, 'r') as zipf:
 image_folder = "./dataset/flicker30k/"
 caption_file_path = "./dataset/results.csv"
 output_file_path = "./dataset/captions.csv"
+
+# Get a set of image names from the folder
+image_names = set(os.listdir(image_folder))
+
+# Filter the caption file
+with open(caption_file_path, "r") as caption_file:
+    lines = caption_file.readlines()
+
+filtered_lines = []
+
+for line in lines:
+    image_name = line.split("|")[0].strip()
+    if image_name in image_names:
+        filtered_lines.append(line)
+
+# Write the filtered lines to a new file
+with open(output_file_path, "w") as output_file:
+    output_file.writelines(filtered_lines)
+
+print(f"Filtered captions saved to {output_file_path}")
+
+
+###################################
+
+# Download latest version
+path_30k = kagglehub.dataset_download("hsankesara/flickr-image-dataset")
+path_30k += '/flickr30k_images'
+print("Path to dataset files:", path_30k)
+
+# Define the source directory containing images
+# Replace with your actual source directory path
+image_path = f'{path_30k}/flickr30k_images/'
+
+# Define the destination directory
+destination_path = './images'
+
+# Ensure the destination directory exists
+os.makedirs(destination_path, exist_ok=True)
+
+# Get a list of all images in the directory
+all_images = [f for f in os.listdir(
+    image_path) if os.path.isfile(os.path.join(image_path, f))]
+
+# Randomly select 5000 images
+selected_images = all_images[:5000]
+
+# Copy the selected images to the destination directory
+for image in selected_images:
+    shutil.copy(os.path.join(image_path, image),
+                os.path.join(destination_path, image))
+
+print(
+    f"Successfully copied {len(selected_images)} images to '{destination_path}'.")
+
+
+# Define the folder and caption file paths
+image_folder = destination_path
+caption_file_path = f"{path_30k}/results.csv"
+output_file_path = './captions.csv'
 
 # Get a set of image names from the folder
 image_names = set(os.listdir(image_folder))
