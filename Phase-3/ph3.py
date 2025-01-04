@@ -253,7 +253,7 @@ def preprocess_text(text):
     return text
 
 
-def read_captions_and_build_vocab(file_path, min_freq=1):
+def read_captions_and_build_vocab(file_path="./dataset/archive/captions.txt", min_freq=1):
     """
     Reads a text file with image captions and builds a Vocabulary object.
 
@@ -280,7 +280,7 @@ def read_captions_and_build_vocab(file_path, min_freq=1):
     return vocab
 
 
-def load_data(file_path, captions_path, data_path, image_size, test_size=0.066667, flicker='8k', coco=None, min_freq=4):
+def load_data(file_path, captions_path, data_path, image_size, test_size=0.066667, flicker='8k', min_freq=4):
     if os.path.exists(file_path):
         dataset = torch.load(file_path)
         print("Dataset loaded successfully.")
@@ -288,7 +288,16 @@ def load_data(file_path, captions_path, data_path, image_size, test_size=0.06666
     else:
         print(
             f"The file '{file_path}' does not exist. Creating a new dataset...")
-        if flicker == '8k':
+        if flicker == '30k':
+            captions_data = []
+            with open(captions_path, 'r') as file:
+                for line in file:
+                    parts = line.strip().split('|')
+                    if len(parts) == 3:
+                        image, _, caption = parts
+                        captions_data.append(
+                            (os.path.join(data_path, image), caption.strip()))
+        else:
             captions_data = []
             with open(captions_path, "r") as f:
                 for line in f:
@@ -298,20 +307,11 @@ def load_data(file_path, captions_path, data_path, image_size, test_size=0.06666
                             (os.path.join(data_path, image_id), caption.strip()))
                     except ValueError:
                         continue
-        else:
-            captions_data = []
-            with open(captions_path, 'r') as file:
-                for line in file:
-                    parts = line.strip().split('|')
-                    if len(parts) == 3:
-                        image, _, caption = parts
-                        captions_data.append(
-                            (os.path.join(data_path, image), caption.strip()))
         # captions_data = captions_data[:10000]
         # Convert to DataFrame
         captions_df = pd.DataFrame(captions_data, columns=["image", "caption"])
 
-        if not coco:
+        if flicker != 'coco':
             # Group captions by image
             grouped_captions = captions_df.groupby(
                 "image")["caption"].apply(list).reset_index()
@@ -333,7 +333,7 @@ def load_data(file_path, captions_path, data_path, image_size, test_size=0.06666
         train_df, val_df = train_test_split(
             grouped_captions, test_size=test_size, random_state=42)
 
-        vocab = read_captions_and_build_vocab(captions_path)
+        vocab = read_captions_and_build_vocab(min_freq=min_freq)
 
         # Find the maximum caption length
         max_caption_length = max(

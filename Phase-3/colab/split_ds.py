@@ -151,9 +151,8 @@ drive.mount('/content/drive')
 
 base_dir = '/content/drive/MyDrive/phase3'
 
-
 # Path to the captions_train2014.json file
-input_file_path = caption_path
+input_file_path = '/root/.cache/kagglehub/datasets/nikhil7280/coco-image-caption/versions/1/annotations_trainval2014/annotations/captions_train2014.json'
 output_file_path = f'{base_dir}/coco.txt'
 
 # Variable for the word count threshold
@@ -172,7 +171,7 @@ for annotation in data['annotations']:
     caption = annotation['caption']
     word_count = len(caption.split())
     if word_count < n:
-        if cnt == 10000:
+        if cnt == 20000:
             break
         cnt += 1
         if cnt % 1000 == 0:
