@@ -1151,7 +1151,7 @@ def train_captioning_model(
                 bc_loss += loss.item()
                 epoch_loss += loss.item()
 
-            if verbose and j % 50 == 0:
+            if verbose and j % 20 == 0:
                 if num_aug != 0:
                     print(
                         f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']}, Loss = {bc_loss/(num_aug):.4f}")
