@@ -280,7 +280,7 @@ def read_captions_and_build_vocab(file_path="./dataset/archive/captions.txt", mi
     return vocab
 
 
-def load_data(file_path, captions_path, data_path, image_size, test_size=0.066667, flicker='8k', min_freq=4):
+def load_data(file_path, captions_path, data_path, vocab_path, test_size=0.066667, flicker='8k', min_freq=4):
     if os.path.exists(file_path):
         dataset = torch.load(file_path)
         print("Dataset loaded successfully.")
@@ -333,7 +333,7 @@ def load_data(file_path, captions_path, data_path, image_size, test_size=0.06666
         train_df, val_df = train_test_split(
             grouped_captions, test_size=test_size, random_state=42)
 
-        vocab = read_captions_and_build_vocab(min_freq=min_freq)
+        vocab = read_captions_and_build_vocab(vocab_path, min_freq=min_freq)
 
         # Find the maximum caption length
         max_caption_length = max(
