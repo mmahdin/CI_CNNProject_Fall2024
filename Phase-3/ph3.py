@@ -19,6 +19,12 @@ from PIL import Image
 import matplotlib.pyplot as plt
 import re
 from transformers import BertModel, BertTokenizer
+from concurrent.futures import ThreadPoolExecutor
+import re
+import string
+from nltk.tokenize import word_tokenize
+from nltk.stem import WordNetLemmatizer
+from nltk.corpus import stopwords
 
 N_P = 10
 
@@ -162,20 +168,37 @@ def process_images(img_np, image_size, augment=False, num_augmented=5):
     return torch.stack(images) if images else torch.empty(0)
 
 
-def read_images(image_list, data_path, image_size):
-    images = []
-    for image_name in image_list:
-        img_path = os.path.join(data_path, image_name)
-        if not os.path.exists(img_path):
-            print(f"Warning: Image '{img_path}' not found. Skipping.")
-            continue
+def read_images(image_paths, image_size):
+    """
+    Reads and processes multiple images from a list of paths.
 
-        # Load the original image
-        img = Image.open(img_path).convert("RGB")
-        img = img.resize(image_size, Image.LANCZOS)
-        img_np = np.array(img)  # Convert PIL Image to numpy array
-        images.append(img_np)
-    return images
+    Args:
+        image_paths (list): List of file paths to images.
+        image_size (tuple): Desired size (width, height) for resizing images.
+
+    Returns:
+        list: List of numpy arrays representing the processed images.
+    """
+    def process_single_image(img_path):
+        try:
+            img = Image.open(img_path).convert("RGB")
+            img = img.resize(image_size, Image.LANCZOS)
+            img_np = np.array(img)
+            return img_np
+        except Exception as e:
+            print(f"Error processing {img_path}: {e}")
+            return None
+
+    with ThreadPoolExecutor() as executor:
+        if isinstance(image_paths, str):
+            results = list(executor.map(process_single_image, [image_paths]))
+        else:
+            results = list(executor.map(process_single_image, image_paths))
+
+    # Filter out None values in case of errors
+    if isinstance(image_paths, str):
+        return results[0]
+    return [img for img in results if img is not None]
 
 
 class Vocabulary:
@@ -184,7 +207,7 @@ class Vocabulary:
         self.idx_to_token = []
         self.counter = Counter()
 
-    def build_vocab(self, captions, min_freq=1):
+    def build_vocab(self, captions, min_freq=3):
         self.counter.update(
             word for caption_list in captions for caption in caption_list for word in caption.split())
         for token, freq in self.counter.items():
@@ -230,40 +253,35 @@ def preprocess_text(text):
     return text
 
 
-def load_data(file_path, captions_path, data_path, image_size, test_size=0.125, flicker='8k'):
-    if os.path.exists(file_path[flicker]):
-        dataset = torch.load(file_path[flicker])
+def load_data(file_path, captions_path, data_path, image_size, test_size=0.066667, flicker='8k'):
+    if os.path.exists(file_path):
+        dataset = torch.load(file_path)
         print("Dataset loaded successfully.")
         return dataset
     else:
         print(
-            f"The file '{file_path[flicker]}' does not exist. Creating a new dataset...")
-
-        flicker8k = []
-        with open(captions_path['8k'], "r") as f:
-            for line in f:
-                try:
-                    image_id, caption = line.strip().split(",", 1)
-                    flicker8k.append((image_id, caption.strip()))
-                except ValueError:
-                    print(f"Skipping malformed line: {line.strip()}")
-                    continue
-
-        try:
-            flicker30k = []
-            with open(captions_path['30k'], 'r') as file:
+            f"The file '{file_path}' does not exist. Creating a new dataset...")
+        if flicker == '8k':
+            captions_data = []
+            with open(captions_path, "r") as f:
+                for line in f:
+                    try:
+                        image_id, caption = line.strip().split(",", 1)
+                        captions_data.append(
+                            (os.path.join(data_path, image_id), caption.strip()))
+                    except ValueError:
+                        print(f"Skipping malformed line: {line.strip()}")
+                        continue
+        else:
+            captions_data = []
+            with open(captions_path, 'r') as file:
                 for line in file:
                     parts = line.strip().split('|')
                     if len(parts) == 3:
                         image, _, caption = parts
-                        flicker30k.append((image.strip(), caption.strip()))
-        except:
-            pass
-
-        if flicker == '8k':
-            captions_data = flicker8k
-        else:
-            captions_data = flicker30k
+                        captions_data.append(
+                            (os.path.join(data_path, image), caption.strip()))
+        captions_data = captions_data[:10000]
         # Convert to DataFrame
         captions_df = pd.DataFrame(captions_data, columns=["image", "caption"])
 
@@ -279,9 +297,6 @@ def load_data(file_path, captions_path, data_path, image_size, test_size=0.125, 
         grouped_captions = grouped_captions[grouped_captions["caption"].apply(
             len) == 5]
 
-        # Split into train and validation sets
-        if flicker == '30k':
-            test_size = 0.01
         train_df, val_df = train_test_split(
             grouped_captions, test_size=test_size, random_state=42)
 
@@ -296,10 +311,8 @@ def load_data(file_path, captions_path, data_path, image_size, test_size=0.125, 
         )
 
         # Process training and validation data
-        train_images = read_images(
-            train_df["image"].tolist(), data_path[flicker], image_size=image_size)
-        val_images = read_images(
-            val_df["image"].tolist(), data_path[flicker], image_size=image_size)
+        train_images = train_df["image"].tolist()
+        val_images = val_df["image"].tolist()
 
         # Convert captions to numerical form
         train_captions = process_captions(
@@ -320,9 +333,9 @@ def load_data(file_path, captions_path, data_path, image_size, test_size=0.125, 
             "max_caption_length": max_caption_length,
         }
 
-        # Save the dataset for future use
-        torch.save(dataset, file_path[flicker])
-        print("Dataset created successfully.")
+        # # Save the dataset for future use
+        # torch.save(dataset, file_path)
+        # print("Dataset created successfully.")
         return dataset
 
 
@@ -1119,14 +1132,15 @@ def train_captioning_model(
         rnn_decoder.train()
         epoch_loss = 0.0
         for j in range(num_batches):
-            images = data_dict['train_images'][batch_size*j:batch_size*(j+1)]
-            num_aug = 1
+            images = read_images(
+                data_dict['train_images'][batch_size*j:batch_size*(j+1)], image_size)
+            num_aug = 0
             images_torch = process_images_batch(
                 images, image_size=image_size, augment=True, num_augmented=num_aug).to(device=device, dtype=dtype)
             captions = data_dict['train_captions'][batch_size *
                                                    j:batch_size*(j+1)]
             bc_loss = 0
-            for ag in range(num_aug):
+            for ag in range(num_aug+1):
                 cap_idx = random.randint(0, captions.shape[1])-1
                 caption = captions[:, cap_idx, :].to(device=device)
                 loss = rnn_decoder(images_torch[:, ag, :, :], caption)
@@ -1137,13 +1151,20 @@ def train_captioning_model(
                 bc_loss += loss.item()
                 epoch_loss += loss.item()
 
-            if verbose and j % 10 == 0:
-                print(
-                    f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']}, Loss = {bc_loss/(num_aug):.4f}")
+            if verbose and j % 50 == 0:
+                if num_aug != 0:
+                    print(
+                        f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']}, Loss = {bc_loss/(num_aug):.4f}")
+                else:
+                    print(
+                        f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']}, Loss = {bc_loss:.4f}")
         if scheduler:
             scheduler.step()
 
-        avg_loss = epoch_loss / (num_aug*num_batches)
+        if num_aug != 0:
+            avg_loss = epoch_loss / (num_aug*num_batches)
+        else:
+            avg_loss = epoch_loss / (num_batches)
         train_loss_history.append(avg_loss)
 
         print(f"  Training Loss: {avg_loss:.4f}")
@@ -1153,8 +1174,8 @@ def train_captioning_model(
         val_loss = 0.0
         with torch.no_grad():
             for j in range(num_batches_val):
-                images = data_dict['val_images'][val_batch_size *
-                                                 j:val_batch_size*(j+1)]
+                images = read_images(
+                    data_dict['val_images'][val_batch_size * j:val_batch_size*(j+1)], image_size)
                 images_torch = process_images_batch(
                     images, image_size=image_size, augment=False).to(device=device, dtype=dtype)
                 captions = data_dict['val_captions'][val_batch_size *
