@@ -333,12 +333,7 @@ def load_data(file_path, captions_path, data_path, image_size, test_size=0.06666
         train_df, val_df = train_test_split(
             grouped_captions, test_size=test_size, random_state=42)
 
-        vocab = Vocabulary()
-        if not coco:
-            vocab.build_vocab(train_df["caption"].tolist(), min_freq=min_freq)
-        else:
-            vocab.build_vocab(train_df["caption"].tolist() +
-                              val_df["caption"].tolist(), min_freq=min_freq)
+        vocab = read_captions_and_build_vocab(captions_path)
 
         # Find the maximum caption length
         max_caption_length = max(
