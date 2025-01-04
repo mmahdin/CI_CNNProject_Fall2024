@@ -207,7 +207,7 @@ class Vocabulary:
         self.idx_to_token = []
         self.counter = Counter()
 
-    def build_vocab(self, captions, min_freq=3):
+    def build_vocab(self, captions, min_freq=1):
         self.counter.update(
             word for caption_list in captions for caption in caption_list for word in caption.split())
         for token, freq in self.counter.items():
@@ -253,7 +253,34 @@ def preprocess_text(text):
     return text
 
 
-def load_data(file_path, captions_path, data_path, image_size, test_size=0.066667, flicker='8k'):
+def read_captions_and_build_vocab(file_path, min_freq=1):
+    """
+    Reads a text file with image captions and builds a Vocabulary object.
+
+    Args:
+        file_path (str): Path to the text file.
+        min_freq (int): Minimum frequency for a word to be included in the vocabulary.
+
+    Returns:
+        Vocabulary: An instance of the Vocabulary class with the built vocabulary.
+    """
+    captions = []
+
+    # Read the file and extract captions
+    with open(file_path, 'r') as file:
+        next(file)  # Skip the header line
+        for line in file:
+            _, caption = line.strip().split(',', 1)
+            captions.append(caption)
+
+    # Build vocabulary
+    vocab = Vocabulary()
+    vocab.build_vocab([captions], min_freq=min_freq)
+
+    return vocab
+
+
+def load_data(file_path, captions_path, data_path, image_size, test_size=0.066667, flicker='8k', coco=None, min_freq=4):
     if os.path.exists(file_path):
         dataset = torch.load(file_path)
         print("Dataset loaded successfully.")
@@ -270,7 +297,6 @@ def load_data(file_path, captions_path, data_path, image_size, test_size=0.06666
                         captions_data.append(
                             (os.path.join(data_path, image_id), caption.strip()))
                     except ValueError:
-                        print(f"Skipping malformed line: {line.strip()}")
                         continue
         else:
             captions_data = []
@@ -281,27 +307,38 @@ def load_data(file_path, captions_path, data_path, image_size, test_size=0.06666
                         image, _, caption = parts
                         captions_data.append(
                             (os.path.join(data_path, image), caption.strip()))
-        captions_data = captions_data[:10000]
+        # captions_data = captions_data[:10000]
         # Convert to DataFrame
         captions_df = pd.DataFrame(captions_data, columns=["image", "caption"])
 
-        # Group captions by image
-        grouped_captions = captions_df.groupby(
-            "image")["caption"].apply(list).reset_index()
+        if not coco:
+            # Group captions by image
+            grouped_captions = captions_df.groupby(
+                "image")["caption"].apply(list).reset_index()
 
-        grouped_captions["caption"] = grouped_captions["caption"].apply(
-            lambda captions: [preprocess_text(caption) for caption in captions]
-        )
+            grouped_captions["caption"] = grouped_captions["caption"].apply(
+                lambda captions: [preprocess_text(
+                    caption) for caption in captions]
+            )
 
-        # Filter images with exactly 5 captions
-        grouped_captions = grouped_captions[grouped_captions["caption"].apply(
-            len) == 5]
+            # Filter images with exactly 5 captions
+            grouped_captions = grouped_captions[grouped_captions["caption"].apply(
+                len) == 5]
+        else:
+            grouped_captions = captions_df
+            grouped_captions["caption"] = grouped_captions["caption"].apply(
+                lambda captions: [preprocess_text(captions)]
+            )
 
         train_df, val_df = train_test_split(
             grouped_captions, test_size=test_size, random_state=42)
 
         vocab = Vocabulary()
-        vocab.build_vocab(train_df["caption"].tolist())
+        if not coco:
+            vocab.build_vocab(train_df["caption"].tolist(), min_freq=min_freq)
+        else:
+            vocab.build_vocab(train_df["caption"].tolist() +
+                              val_df["caption"].tolist(), min_freq=min_freq)
 
         # Find the maximum caption length
         max_caption_length = max(
@@ -312,6 +349,7 @@ def load_data(file_path, captions_path, data_path, image_size, test_size=0.06666
 
         # Process training and validation data
         train_images = train_df["image"].tolist()
+        print(len(train_images))
         val_images = val_df["image"].tolist()
 
         # Convert captions to numerical form
