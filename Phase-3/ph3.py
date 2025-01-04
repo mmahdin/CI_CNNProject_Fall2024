@@ -814,7 +814,7 @@ class CaptioningRNN(nn.Module):
     """
 
     def __init__(self, word_to_idx, input_dim=512, wordvec_dim=128,
-                 hidden_dim=128, cell_type='rnn', device='cpu', p=0.4,
+                 hidden_dim=128, cell_type='rnn', device='cpu', p=0.3,
                  ignore_index=None, dtype=torch.float32):
         """
         Construct a new CaptioningRNN instance.
@@ -867,12 +867,13 @@ class CaptioningRNN(nn.Module):
             self.feat_extract = FeatureExtractor(
                 pooling=False, device=device, dtype=dtype)
             self.rnn = AttentionLSTM(
-                wordvec_dim, hidden_dim, use_ln=True, dropout=0.4, device=device, dtype=dtype)
+                wordvec_dim, hidden_dim, use_ln=True, dropout=0.3, device=device, dtype=dtype)
         else:
             raise ValueError
         nn.init.kaiming_normal_(self.affine_l.weight)
         nn.init.zeros_(self.affine_l.bias)
-        self.word_embed = BERTEmbedding(device=device)
+        self.word_embed = WordEmbedding(
+            vocab_size, wordvec_dim, device=device, dtype=dtype)
         self.temporal_affine_l = nn.Linear(
             hidden_dim, vocab_size).to(device=device, dtype=dtype)
         self.temporal_affine = nn.Sequential(
@@ -917,68 +918,83 @@ class CaptioningRNN(nn.Module):
 
         if self.cell_type == 'attention':
             h0 = h0.permute(0, 3, 1, 2)  # permute back (N, H, 4, 4)
-        # Convert captions_in indices to words using the custom vocabulary
-        captions_in_words = [
-            " ".join([self.idx_to_word[idx]
-                     for idx in seq if idx != self._null])
-            for seq in captions_in.tolist()
-        ]
 
-        # Tokenize captions using BERT's tokenizer
-        max_length = captions_in.shape[1]  # Ensure consistent token length
-        inputs = self.word_embed.tokenizer(
-            captions_in_words, return_tensors="pt", padding="max_length", truncation=True, max_length=max_length
-        )
-        inputs = {key: value.to(self.word_embed.device)
-                  for key, value in inputs.items()}
-
-        # Get BERT embeddings
-        bert_embeddings = self.word_embed.bert(
-            **inputs).last_hidden_state  # N x T x H_bert
-
-        # Pass embeddings through RNN
-        h = self.rnn(bert_embeddings, h0)  # N x T x hidden_dim
-
-        # Compute scores and loss
-        scores = self.temporal_affine(h)  # N x T x V
+        x = self.word_embed(captions_in)  # N x T x wordvec_dim
+        h = self.rnn(x, h0)  # N x T x H
+        score = self.temporal_affine(h)  # N x T x V
         loss = temporal_softmax_loss(
-            scores, captions_out, ignore_index=self._null)
+            score, captions_out, ignore_index=self._null)
 
         return loss
 
     def sample(self, images, max_length=15):
+        """
+        Run a test-time forward pass for the model, sampling captions for input
+        feature vectors.
+
+        At each timestep, we embed the current word, pass it and the previous hidden
+        state to the RNN to get the next hidden state, use the hidden state to get
+        scores for all vocab words, and choose the word with the highest score as
+        the next word. The initial hidden state is computed by applying an affine
+        transform to the image features, and the initial word is the <START>
+        token.
+
+        For LSTMs you will also have to keep track of the cell state; in that case
+        the initial cell state should be zero.
+
+        Inputs:
+        - images: Input images, of shape (N, 3, 112, 112)
+        - max_length: Maximum length T of generated captions
+
+        Returns:
+        - captions: Array of shape (N, max_length) giving sampled captions,
+          where each element is an integer in the range [0, V). The first element
+          of captions should be the first sampled word, not the <START> token.
+        """
         N = images.shape[0]
-        captions = self._null * \
-            torch.ones(N, max_length, dtype=torch.long, device=self.device)
+        captions = self._null * images.new(N, max_length).fill_(1).long()
+
+        if self.cell_type == 'attention':
+            attn_weights_all = images.new(
+                N, max_length, N_P, N_P).fill_(0).float()
 
         feature = self.feat_extract.extract_feature(images)
+        A = None
         if self.cell_type == 'attention':
+            # make it N * 4 * 4 * input_dim
             feature = feature.permute(0, 2, 3, 1)
         prev_h = self.affine(feature)
         prev_c = torch.zeros_like(prev_h)
         if self.cell_type == 'attention':
-            A = prev_h.permute(0, 3, 1, 2)
+            A = prev_h.permute(0, 3, 1, 2)  # permute back
             prev_h = A.mean(dim=(2, 3))
             prev_c = A.mean(dim=(2, 3))
 
-        tokens = ["<start>"] * N
+        x = torch.ones((N, self.wordvec_dim), dtype=prev_h.dtype,
+                       device=prev_h.device) * self.word_embed(self._start).reshape(1, -1)
         for i in range(max_length):
-            x = self.word_embed(tokens)
+            next_h = None
             if self.cell_type == 'rnn':
                 next_h = self.rnn.step_forward(x, prev_h)
             elif self.cell_type == 'lstm':
                 next_h, prev_c = self.rnn.step_forward(x, prev_h, prev_c)
             else:
                 attn, attn_weights = dot_product_attention(prev_h, A)
+                attn_weights_all[:, i] = attn_weights
                 next_h, prev_c = self.rnn.step_forward(x, prev_h, prev_c, attn)
 
             score = self.temporal_affine(next_h)
-            tokens = [self.idx_to_word[token]
-                      for token in torch.argmax(score, dim=1).tolist()]
-            captions[:, i] = tokens
+            # loss = temporal_softmax_loss(score, captions_out, ignore_index=self._null)
+            max_idx = torch.argmax(score, dim=1)
+            captions[:, i] = max_idx
+            x = self.word_embed(max_idx)
+            # print(x.shape)
             prev_h = next_h
 
-        return captions
+        if self.cell_type == 'attention':
+            return captions, attn_weights_all.cpu()
+        else:
+            return captions
 
 
 def temporal_softmax_loss(x, y, ignore_index=None):
@@ -1047,21 +1063,6 @@ class WordEmbedding(nn.Module):
         return out
 
 
-class BERTEmbedding(nn.Module):
-    def __init__(self, pretrained_model_name='bert-base-uncased', device='cpu'):
-        super().__init__()
-        self.tokenizer = BertTokenizer.from_pretrained(pretrained_model_name)
-        self.bert = BertModel.from_pretrained(pretrained_model_name).to(device)
-        self.device = device
-
-    def forward(self, captions):
-        # Tokenize and convert to tensors
-        inputs = self.tokenizer(
-            captions, return_tensors="pt", padding=True, truncation=True)
-        inputs = {key: value.to(self.device) for key, value in inputs.items()}
-        outputs = self.bert(**inputs)
-        return outputs.last_hidden_state  # Use the last hidden state as embeddings
-
 #########################################################################
 #                                  Train                                #
 #########################################################################
@@ -1070,7 +1071,7 @@ class BERTEmbedding(nn.Module):
 def train_captioning_model(
     rnn_decoder, optimizer, data_dict,
     device='cuda', dtype=torch.float32, epochs=1, batch_size=256,
-    scheduler=None, val_perc=0.5, image_size=(256, 256), lr=None,
+    scheduler=None, val_perc=0.5, image_size=(256, 256), lr=None, weight_decay=None,
     verbose=True, checkpoint_path='./models/captioning_checkpoint.pth',
     history_path='./history/captioning_train_history.pkl', vocab_size=None
 ):
@@ -1099,6 +1100,9 @@ def train_captioning_model(
         if lr:
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
+        if weight_decay:
+            for param_group in optimizer.param_groups:
+                param_group['weight_decay'] = weight_decay
         if scheduler:
             scheduler.load_state_dict(checkpoint['scheduler_state'])
         start_epoch = checkpoint['epoch']
@@ -1133,7 +1137,7 @@ def train_captioning_model(
                 bc_loss += loss.item()
                 epoch_loss += loss.item()
 
-            if verbose and j % 50 == 0:
+            if verbose and j % 10 == 0:
                 print(
                     f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']}, Loss = {bc_loss/(num_aug):.4f}")
         if scheduler:
@@ -1218,10 +1222,10 @@ def attention_visualizer(img, attn_weights, token):
     img_copy = img.float().div(255.).permute(1, 2, 0).numpy()[
         :, :, ::-1].copy()  # Convert to BGR for cv2
     masked_img = cv2.addWeighted(attn_weights_3d, 0.5, img_copy, 0.5, 0)
-    img_copy = np.concatenate((np.zeros((25, W, 3)), masked_img), axis=0)
+    img_copy = np.concatenate((np.zeros((50, W, 3)), masked_img), axis=0)
 
     # Add text
-    cv2.putText(img_copy, '%s' % (token), (10, 15),
-                cv2.FONT_HERSHEY_PLAIN, 1.0, (255, 255, 255), thickness=1)
+    cv2.putText(img_copy, '%s' % (token), (10, 40),
+                cv2.FONT_HERSHEY_PLAIN, 2.0, (255, 255, 255), thickness=2)
 
     return img_copy
