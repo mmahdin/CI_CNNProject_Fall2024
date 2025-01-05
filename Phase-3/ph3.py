@@ -1164,8 +1164,10 @@ def train_captioning_model(
                                                    j:batch_size*(j+1)]
             bc_loss = 0
             for ag in range(num_aug+1):
-                cap_idx = random.randint(0, captions.shape[1])-1
-                caption = captions[:, cap_idx, :].to(device=device)
+                zero_counts = (captions == 0).sum(dim=2)
+                max_zero_indices = zero_counts.argmax(dim=1)
+                caption = torch.gather(
+                    captions, 1, max_zero_indices.view(-1, 1, 1).expand(-1, 1, captions.size(2))).squeeze(1).to(device)
                 loss = rnn_decoder(images_torch[:, ag, :, :], caption)
                 optimizer.zero_grad()
                 loss.backward()
@@ -1203,14 +1205,14 @@ def train_captioning_model(
                     images, image_size=image_size, augment=False).to(device=device, dtype=dtype)
                 captions = data_dict['val_captions'][val_batch_size *
                                                      j:val_batch_size*(j+1)]
-                for cap_idx in range(captions.shape[1]):
-                    caption = captions[:, cap_idx, :].to(device=device)
+                zero_counts = (captions == 0).sum(dim=2)
+                max_zero_indices = zero_counts.argmax(dim=1)
+                caption = torch.gather(
+                    captions, 1, max_zero_indices.view(-1, 1, 1).expand(-1, 1, captions.size(2))).squeeze(1).to(device)
+                loss = rnn_decoder(images_torch, caption)
+                val_loss += loss.item()
 
-                    loss = rnn_decoder(images_torch, caption)
-
-                    val_loss += loss.item()
-
-        avg_val_loss = val_loss / (num_batches_val*captions.shape[1])
+        avg_val_loss = val_loss / (num_batches_val)
         val_loss_history.append(avg_val_loss)
 
         print(f"  Validation Loss: {avg_val_loss:.4f}")
