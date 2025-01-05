@@ -254,16 +254,6 @@ def preprocess_text(text):
 
 
 def read_captions_and_build_vocab(file_path="./dataset/archive/captions.txt", min_freq=1):
-    """
-    Reads a text file with image captions and builds a Vocabulary object.
-
-    Args:
-        file_path (str): Path to the text file.
-        min_freq (int): Minimum frequency for a word to be included in the vocabulary.
-
-    Returns:
-        Vocabulary: An instance of the Vocabulary class with the built vocabulary.
-    """
     captions = []
 
     # Read the file and extract captions
@@ -271,13 +261,17 @@ def read_captions_and_build_vocab(file_path="./dataset/archive/captions.txt", mi
         next(file)  # Skip the header line
         for line in file:
             _, caption = line.strip().split(',', 1)
-            captions.append(caption)
+            captions.append(preprocess_text(caption))
 
     # Build vocabulary
     vocab = Vocabulary()
     vocab.build_vocab([captions], min_freq=min_freq)
 
     return vocab
+
+
+def count_captions_by_length(captions, n):
+    return sum(1 for caption in captions if len(caption.split()) >= n)
 
 
 def load_data(file_path, captions_path, data_path, vocab_path, test_size=0.066667, flicker='8k', min_freq=4):
@@ -336,11 +330,7 @@ def load_data(file_path, captions_path, data_path, vocab_path, test_size=0.06666
         vocab = read_captions_and_build_vocab(vocab_path, min_freq=min_freq)
 
         # Find the maximum caption length
-        max_caption_length = max(
-            len(vocab.numericalize(caption))
-            for caption_list in train_df["caption"]
-            for caption in caption_list
-        )
+        max_caption_length = 22+2
 
         # Process training and validation data
         train_images = train_df["image"].tolist()
