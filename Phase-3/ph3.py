@@ -919,7 +919,7 @@ class CaptioningRNN(nn.Module):
         nn.init.kaiming_normal_(self.temporal_affine_l.weight)
         nn.init.zeros_(self.temporal_affine_l.bias)
 
-    def forward(self, images, captions):
+    def forward(self, images, captions, cap_idx=None, val=None):
         """
         Compute training-time loss for the RNN. We input images and
         ground-truth captions for those images, and use an RNN (or LSTM) to compute
@@ -939,9 +939,9 @@ class CaptioningRNN(nn.Module):
         # by one relative to each other because the RNN should produce word (t+1)
         # after receiving word t. The first element of captions_in will be the START
         # token, and the first element of captions_out will be the first word.
-        captions_in = captions[:, :-1]  # N x T
-        captions_out = captions[:, 1:]
 
+        captions_in = captions[:, cap_idx, :][:, :-1]
+        captions_out = captions[:, :, 1:]
         loss = 0.0
 
         feature = self.feat_extract.extract_feature(images)  # N x 1280
@@ -954,12 +954,11 @@ class CaptioningRNN(nn.Module):
 
         if self.cell_type == 'attention':
             h0 = h0.permute(0, 3, 1, 2)  # permute back (N, H, 4, 4)
-
         x = self.word_embed(captions_in)  # N x T x wordvec_dim
         h = self.rnn(x, h0)  # N x T x H
         score = self.temporal_affine(h)  # N x T x V
         loss = temporal_softmax_loss(
-            score, captions_out, ignore_index=self._null)
+            score, captions_out, ignore_index=self._null, val=val, cap_idx=cap_idx)
 
         return loss
 
@@ -1033,7 +1032,61 @@ class CaptioningRNN(nn.Module):
             return captions
 
 
-def temporal_softmax_loss(x, y, ignore_index=None):
+def compute_bleu_score(candidate, references, max_n=3):
+    """
+    Compute the BLEU score for a single candidate sentence.
+
+    Inputs:
+    - candidate: List of tokens for the generated caption.
+    - references: List of reference captions, where each reference is a list of tokens.
+    - max_n: Maximum n-gram size to consider (default is 4 for BLEU-4).
+
+    Returns:
+    - bleu_score: BLEU score for the candidate caption.
+    """
+    def n_grams(tokens, n):
+        return [tuple(tokens[i:i + n]) for i in range(len(tokens) - n + 1)]
+    references = references.tolist()
+    candidate = candidate.tolist()
+    candidate = [token for token in candidate if token not in {0, 1, 2}]
+    references = [[token for token in ref if token not in {
+        0, 1, 2}] for ref in references]
+    precisions = []
+    for n in range(1, max_n + 1):
+        candidate_ngrams = Counter(n_grams(candidate, n))
+        reference_ngrams = Counter()
+        for ref in references:
+            reference_ngrams.update(n_grams(ref, n))
+
+        # Count matches and total candidate n-grams
+        match_count = sum((candidate_ngrams & reference_ngrams).values())
+        total_count = sum(candidate_ngrams.values())
+        precisions.append(
+            match_count / total_count if total_count > 0 else 0.0)
+
+    # Compute geometric mean of precisions
+    if all(p > 0 for p in precisions):
+        geometric_mean = np.exp(np.sum(np.log(precisions)) / max_n)
+    else:
+        geometric_mean = 0.0
+
+    # Brevity penalty
+    candidate_len = len(candidate)
+    reference_lens = [len(ref) for ref in references]
+    closest_len = min(reference_lens, key=lambda ref_len: abs(
+        ref_len - candidate_len))
+    brevity_penalty = 1.0 if candidate_len > closest_len else np.exp(
+        1 - closest_len / candidate_len)
+    return brevity_penalty * geometric_mean
+
+
+def temporal_softmax_loss(
+        x, y,
+        ignore_index=None,
+        alpha=1,
+        val=None,
+        cap_idx=None
+):
     """
     A temporal version of softmax loss for use in RNNs. We assume that we are
     making predictions over a vocabulary of size V for each timestep of a
@@ -1060,12 +1113,34 @@ def temporal_softmax_loss(x, y, ignore_index=None):
 
     N, T, V = x.shape
     x_flat = x.reshape(N*T, V)
-    y_flat = y.reshape(N*T)
-    loss = F.cross_entropy(
-        x_flat, y_flat, ignore_index=ignore_index, reduction='sum')
-    loss = loss / N
 
-    return loss
+    if val != None:
+        _, m, _ = y.shape
+        min_losses = torch.full((N,), float('inf'), device=x.device)
+        for i in range(m):
+            y_flat = y[:, i, :].reshape(N * T)
+            loss = F.cross_entropy(
+                x_flat, y_flat, ignore_index=ignore_index, reduction='none')
+            loss = loss.reshape(N, T).sum(dim=1)
+            min_losses = torch.minimum(min_losses, loss)
+        return min_losses.mean()
+    else:
+        y_flat = y[:, cap_idx, :].reshape(N*T)
+        loss = F.cross_entropy(
+            x_flat, y_flat, ignore_index=ignore_index, reduction='sum')
+        loss = loss / N
+
+        max_idx = torch.argmax(x, dim=-1)
+        captions = max_idx
+
+        bleu_scores = [
+            compute_bleu_score(gen, ref)
+            for gen, ref in zip(captions, y)
+        ]
+        bleu_reward = torch.tensor(bleu_scores, requires_grad=False).mean()
+        combined_loss = loss - alpha * loss * bleu_reward
+
+        return combined_loss, loss, bleu_reward
 
 
 class WordEmbedding(nn.Module):
@@ -1154,6 +1229,7 @@ def train_captioning_model(
         # Training phase
         rnn_decoder.train()
         epoch_loss = 0.0
+        epoch_bleu_reward = 0
         for j in range(num_batches):
             images = read_images(
                 data_dict['train_images'][batch_size*j:batch_size*(j+1)], image_size)
@@ -1161,38 +1237,41 @@ def train_captioning_model(
             images_torch = process_images_batch(
                 images, image_size=image_size, augment=True, num_augmented=num_aug).to(device=device, dtype=dtype)
             captions = data_dict['train_captions'][batch_size *
-                                                   j:batch_size*(j+1)]
+                                                   j:batch_size*(j+1)].to(device=device)
             bc_loss = 0
             for ag in range(num_aug+1):
-                zero_counts = (captions == 0).sum(dim=2)
-                max_zero_indices = zero_counts.argmax(dim=1)
-                caption = torch.gather(
-                    captions, 1, max_zero_indices.view(-1, 1, 1).expand(-1, 1, captions.size(2))).squeeze(1).to(device)
-                loss = rnn_decoder(images_torch[:, ag, :, :], caption)
+                cap_idx = random.randint(0, captions.shape[1])-1
+                loss = rnn_decoder(
+                    images_torch[:, ag, :, :], captions, cap_idx)
                 optimizer.zero_grad()
-                loss.backward()
+                loss[0].backward()
                 optimizer.step()
+                total_loss, cross_loss, bleu_reward = loss
+                bc_loss += total_loss.item()
+                epoch_loss += total_loss.item()
 
-                bc_loss += loss.item()
-                epoch_loss += loss.item()
+                epoch_bleu_reward += bleu_reward
 
             if verbose and j % 20 == 0:
                 if num_aug != 0:
                     print(
-                        f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']}, Loss = {bc_loss/(num_aug):.4f}")
+                        f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']:.5f}, Loss = {bc_loss/(num_aug):.4f}")
                 else:
                     print(
-                        f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']}, Loss = {bc_loss:.4f}")
+                        f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']:.5f}, Loss = {bc_loss:.4f}")
         if scheduler:
             scheduler.step()
 
         if num_aug != 0:
             avg_loss = epoch_loss / (num_aug*num_batches)
+            epoch_bleu_reward = epoch_bleu_reward / (num_aug*num_batches)
         else:
             avg_loss = epoch_loss / (num_batches)
+            epoch_bleu_reward = epoch_bleu_reward / num_batches
         train_loss_history.append(avg_loss)
 
-        print(f"  Training Loss: {avg_loss:.4f}")
+        print(
+            f"  Training Loss: {avg_loss:.4f}, BLEU Reward: {epoch_bleu_reward:.5f}")
 
         # Validation phase
         rnn_decoder.eval()
@@ -1204,14 +1283,10 @@ def train_captioning_model(
                 images_torch = process_images_batch(
                     images, image_size=image_size, augment=False).to(device=device, dtype=dtype)
                 captions = data_dict['val_captions'][val_batch_size *
-                                                     j:val_batch_size*(j+1)]
-                zero_counts = (captions == 0).sum(dim=2)
-                max_zero_indices = zero_counts.argmax(dim=1)
-                caption = torch.gather(
-                    captions, 1, max_zero_indices.view(-1, 1, 1).expand(-1, 1, captions.size(2))).squeeze(1).to(device)
-                loss = rnn_decoder(images_torch, caption)
+                                                     j:val_batch_size*(j+1)].to(device=device)
+                cap_idx = random.randint(0, captions.shape[1])-1
+                loss = rnn_decoder(images_torch, captions, cap_idx, True)
                 val_loss += loss.item()
-
         avg_val_loss = val_loss / (num_batches_val)
         val_loss_history.append(avg_val_loss)
 
