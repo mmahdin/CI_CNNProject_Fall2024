@@ -11,6 +11,9 @@ import pandas as pd
 import numpy as np
 import os
 import time
+import numpy as np
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 ################################################################################
 # ResNet for CIFAR-10
 ################################################################################
@@ -126,6 +129,31 @@ class ResNet(nn.Module):
 
 ########################### Functions ###########################
 
+def get_augmentation_pipeline(image_size):
+    return A.Compose([
+        A.HorizontalFlip(p=0.8),
+        A.Rotate(limit=40, p=0.8),  # Random rotation within ±50 degrees
+        A.RandomCrop(width=int(image_size[0]*0.9),
+                     height=int(image_size[1]*0.9), p=0.7),
+        A.Resize(*image_size),
+        ToTensorV2()
+    ])
+
+
+def augment_images(images):
+    image_size = (50, 50)
+    augment_pipeline = get_augmentation_pipeline(image_size)
+
+    augmented_images = []
+    for image in images:
+        # Convert the image from (3, 50, 50) to (50, 50, 3) as Albumentations expects (H, W, C)
+        image = image.permute(1, 2, 0).cpu().numpy()
+        augmented_image = augment_pipeline(image=image)['image']
+        augmented_images.append(augmented_image)
+
+    # Convert the list of augmented images back to a tensor with shape (256, 3, 50, 50)
+    return torch.stack(augmented_images)
+
 
 def reset_seed(number):
     random.seed(number)
@@ -210,7 +238,7 @@ def check_accuracy(loader, model, device='cpu', dtype=torch.float32):
 
 def train_model(
     model, optimizer, loader_train, loader_val,
-    device='cuda', dtype=torch.float32, epochs=1,
+    device='cuda', dtype=torch.float32, epochs=1, lr=None,
     scheduler=None, learning_rate_decay=0.1, schedule=[],
     verbose=True, checkpoint_path='./models/checkpoint.pth',
     history_path='./history/train_history.pkl', class_weights_tensor=None
@@ -238,6 +266,9 @@ def train_model(
         optimizer.load_state_dict(checkpoint['optimizer_state'])
         if scheduler:
             scheduler.load_state_dict(checkpoint['scheduler_state'])
+        if lr:
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr
         start_epoch = checkpoint['epoch']
         train_metrics_history = checkpoint['train_history']
         val_metrics_history = checkpoint['val_history']
@@ -258,35 +289,39 @@ def train_model(
         all_labels = []
 
         for batch_idx, batch in enumerate(loader_train):
-            x = batch["image"].to(device=device, dtype=dtype)
+            x_main = batch["image"]
+            x_aug = augment_images(x_main)
+            xs = [x_main, x_aug]
             y = batch["label"].to(device=device)
+            for x in xs:
+                x = x.to(device=device, dtype=dtype)
+                scores = model(x)
+                if class_weights_tensor != None:
+                    loss = loss_fn(scores, y)
+                else:
+                    loss = F.cross_entropy(scores, y)
 
-            scores = model(x)
-            if class_weights_tensor != None:
-                loss = loss_fn(scores, y)
-            else:
-                loss = F.cross_entropy(scores, y)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+                _, preds = scores.max(1)
+                all_preds.extend(preds.cpu().numpy())
+                all_labels.extend(y.cpu().numpy())
 
-            _, preds = scores.max(1)
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(y.cpu().numpy())
-
-            num_correct += (preds == y).sum().item()
-            num_samples += y.size(0)
-            epoch_loss += loss.item()
+                num_correct += (preds == y).sum().item()
+                num_samples += y.size(0)
+                epoch_loss += loss.item()
 
             if verbose and batch_idx % 100 == 0:
-                print(f"  Batch {batch_idx}, Loss = {loss.item():.4f}")
+                print(
+                    f"  Batch {batch_idx}, lr = {optimizer.param_groups[0]['lr']}, Loss = {loss.item():.4f}")
         if scheduler:
             scheduler.step()
             current_lr = optimizer.param_groups[0]['lr']
             lr_history.append(current_lr)
 
-        avg_loss = epoch_loss / len(loader_train)
+        avg_loss = epoch_loss / (len(loader_train)*2)
         train_metrics_history['loss'].append(avg_loss)
         train_accuracy = float(num_correct) / num_samples
         train_precision = precision_score(
