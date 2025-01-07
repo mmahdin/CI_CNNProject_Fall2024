@@ -535,7 +535,6 @@ def lstm_step_forward(x, prev_h, prev_c, Wx, Wh, b, attn=None, Wattn=None):
     - next_c: Next cell state, of shape (N, H)
     """
     next_h, next_c = None, None
-
     N, H = prev_h.shape
     a = None
     if attn is None:  # regular lstm
@@ -647,54 +646,6 @@ class LSTM(nn.Module):
             x, prev_h, prev_c, self.Wx, self.Wh, self.b)
         return next_h, next_c
 
-
-class LSTMCellWithLNAndDropout(torch.nn.Module):
-    def __init__(self, D, H, use_ln=False, dropout=0.0):
-        super().__init__()
-        self.H = H
-        self.use_ln = use_ln
-        self.dropout = dropout
-
-        self.Wx = torch.nn.Parameter(torch.randn(D, 4 * H) * 0.01)
-        self.Wh = torch.nn.Parameter(torch.randn(H, 4 * H) * 0.01)
-        self.b = torch.nn.Parameter(torch.zeros(4 * H))
-
-        # Optional attention weights
-        self.Wattn = None
-
-        # Layer normalization layers (optional)
-        if use_ln:
-            self.ln = torch.nn.LayerNorm(4 * H)
-
-        # Dropout layer (optional)
-        self.do = torch.nn.Dropout(dropout)
-
-    def forward(self, x, prev_h, prev_c, attn=None):
-        """
-        Forward pass for a single timestep of an LSTM with optional LN and DO.
-        """
-        a = x.mm(self.Wx) + prev_h.mm(self.Wh) + self.b
-        if attn is not None and self.Wattn is not None:
-            a += attn.mm(self.Wattn)
-
-        # Apply layer normalization if enabled
-        if self.use_ln:
-            a = self.ln(a)
-
-        i = torch.sigmoid(a[:, :self.H])
-        f = torch.sigmoid(a[:, self.H:2*self.H])
-        o = torch.sigmoid(a[:, 2*self.H:3*self.H])
-        g = torch.tanh(a[:, 3*self.H:])
-
-        next_c = f * prev_c + i * g
-        next_h = o * torch.tanh(next_c)
-
-        # Apply dropout to the hidden state if enabled
-        if self.dropout > 0.0:
-            next_h = self.do(next_h)
-
-        return next_h, next_c
-
 #########################################################################
 #                               Attention LSTM                          #
 #########################################################################
@@ -716,7 +667,6 @@ def dot_product_attention(prev_h, A):
     N, H, D_a, _ = A.shape
 
     attn, attn_weights = None, None
-
     from math import sqrt
     h_tilt = prev_h.reshape(N, 1, H)
     A_tilt = A.reshape(N, H, -1)
@@ -729,16 +679,20 @@ def dot_product_attention(prev_h, A):
     return attn, attn_weights
 
 
-def attention_forward(x, A, lstm_cell):
+def attention_forward(x, A, Wx, Wh, Wattn, b):
     """
     Inputs:
     - x: Input data, of shape (N, T, D)
     - A: **Projected** activation map, of shape (N, H, 4, 4)
-    - lstm_cell: Instance of LSTMCellWithLNAndDropout, initialized with required parameters
+    - Wx: Weights for input-to-hidden connections, of shape (D, 4H)
+    - Wh: Weights for hidden-to-hidden connections, of shape (H, 4H)
+    - Wattn: Weights for attention-to-hidden connections, of shape (H, 4H)
+    - b: Biases, of shape (4H,)
 
     Returns a tuple of:
     - h: Hidden states for all timesteps of all sequences, of shape (N, T, H)
     """
+
     h = None
 
     h0 = A.mean(dim=(2, 3))  # Initial hidden state, of shape (N, H)
@@ -751,8 +705,8 @@ def attention_forward(x, A, lstm_cell):
     prev_c = c0
     for i in range(T):
         attn, attn_weights = dot_product_attention(prev_h, A)
-        # Use LSTMCellWithLNAndDropout
-        next_h, next_c = lstm_cell(x[:, i, :], prev_h, prev_c, attn=attn)
+        next_h, next_c = lstm_step_forward(
+            x[:, i, :], prev_h, prev_c, Wx, Wh, b, attn=attn, Wattn=Wattn)
         prev_h = next_h
         prev_c = next_c
         h[:, i, :] = prev_h
@@ -762,59 +716,109 @@ def attention_forward(x, A, lstm_cell):
 
 class AttentionLSTM(nn.Module):
     """
-    Single-layer, uni-directional Attention module.
+    This is our single-layer, uni-directional Attention module.
 
     Arguments for initialization:
     - input_size: Input size, denoted as D before
     - hidden_size: Hidden size, denoted as H before
     """
 
-    def __init__(self, input_size, hidden_size, use_ln=False, dropout=0.0, device='cpu', dtype=torch.float32):
+    def __init__(self, input_size, hidden_size, device='cpu',
+                 dtype=torch.float32):
         """
-        Initialize the Attention LSTM.
-
-        Parameters:
-        - input_size: Size of the input (D).
-        - hidden_size: Size of the hidden state (H).
-        - use_ln: Whether to use Layer Normalization (default: False).
-        - dropout: Dropout probability (default: 0.0).
-        - device: Device to initialize tensors on.
-        - dtype: Data type for tensors.
+        Initialize a LSTM.
+        Model parameters to initialize:
+        - Wx: Weights for input-to-hidden connections, of shape (D, 4H)
+        - Wh: Weights for hidden-to-hidden connections, of shape (H, 4H)
+        - Wattn: Weights for attention-to-hidden connections, of shape (H, 4H)
+        - b: Biases, of shape (4H,)
         """
         super().__init__()
 
-        # Initialize LSTMCellWithLNAndDropout
-        self.lstm_cell = LSTMCellWithLNAndDropout(
-            input_size, hidden_size, use_ln=use_ln, dropout=dropout
-        ).to(device=device, dtype=dtype)
+        # Register parameters
+        self.Wx = Parameter(torch.randn(input_size, hidden_size*4,
+                                        device=device, dtype=dtype).div(math.sqrt(input_size)))
+        self.Wh = Parameter(torch.randn(hidden_size, hidden_size*4,
+                                        device=device, dtype=dtype).div(math.sqrt(hidden_size)))
+        self.Wattn = Parameter(torch.randn(hidden_size, hidden_size*4,
+                                           device=device, dtype=dtype).div(math.sqrt(hidden_size)))
+        self.b = Parameter(torch.zeros(hidden_size*4,
+                           device=device, dtype=dtype))
 
     def forward(self, x, A):
         """  
         Inputs:
-        - x: Input data for the entire timeseries, of shape (N, T, D).
-        - A: The projected CNN feature activation, of shape (N, H, 4, 4).
+        - x: Input data for the entire timeseries, of shape (N, T, D)
+        - A: The projected CNN feature activation, of shape (N, H, 4, 4)
 
         Outputs:
-        - h: Hidden states for all timesteps, of shape (N, T, H).
+        - hn: The hidden state output
         """
-        h = attention_forward(x, A, self.lstm_cell)
-        return h
+        hn = attention_forward(x, A, self.Wx, self.Wh, self.Wattn, self.b)
+        return hn
 
     def step_forward(self, x, prev_h, prev_c, attn):
         """
         Inputs:
-        - x: Input data for one time step, of shape (N, D).
-        - prev_h: The previous hidden state, of shape (N, H).
-        - prev_c: The previous cell state, of shape (N, H).
-        - attn: The attention embedding, of shape (N, H).
+        - x: Input data for one time step, of shape (N, D)
+        - prev_h: The previous hidden state, of shape (N, H)
+        - prev_c: The previous cell state, of shape (N, H)
+        - attn: The attention embedding, of shape (N, H)
 
         Outputs:
-        - next_h: The next hidden state, of shape (N, H).
-        - next_c: The next cell state, of shape (N, H).
+        - next_h: The next hidden state, of shape (N, H)
+        - next_c: The next cell state, of shape (N, H)
         """
-        # Use LSTMCellWithLNAndDropout for step-wise computation
-        next_h, next_c = self.lstm_cell(x, prev_h, prev_c, attn=attn)
+        next_h, next_c = lstm_step_forward(x, prev_h, prev_c, self.Wx, self.Wh,
+                                           self.b, attn=attn, Wattn=self.Wattn)
         return next_h, next_c
+
+
+class SelfAttention(nn.Module):
+    def __init__(self, in_channels):
+        """
+        Self-Attention mechanism for feature maps.
+        Args:
+        - in_channels: Number of input channels of the feature map.
+        """
+        super(SelfAttention, self).__init__()
+        self.in_channels = in_channels
+
+        # Query, Key, Value projections
+        self.query = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        self.key = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        self.value = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+
+        # Softmax for attention scores
+        self.softmax = nn.Softmax(dim=-1)
+
+        # Output scaling
+        self.gamma = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x):
+        """
+        Forward pass of the self-attention layer.
+        Args:
+        - x: Input feature map of shape (batch_size, in_channels, height, width)
+        Returns:
+        - out: Output feature map after self-attention
+        """
+        N, C, H, W = x.shape
+
+        query = self.query(x).view(N, -1, H*W)  # (N, C', H*W)
+        key = self.key(x).view(N, -1, H*W).permute(0, 2, 1)  # (N, H*W, C')
+
+        attention = torch.bmm(key, query)  # (N, H*W, H*W)
+        attention = self.softmax(attention)
+
+        # Compute Value
+        value = self.value(x).view(N, -1, H * W)  # (N, C', H*W)
+
+        out = torch.bmm(value, attention)  # (N, C, H*W)
+        out = out.view(N, C, H, W)
+
+        out = self.gamma * out + x
+        return out
 
 
 def reset_seed(number):
@@ -890,6 +894,8 @@ class CaptioningRNN(nn.Module):
             nn.Dropout(p=p)  # Adding dropout with a probability of 0.5
         )
 
+        self.self_attention = SelfAttention(input_dim)
+
         if cell_type == 'rnn' or cell_type == 'lstm':
             self.feat_extract = FeatureExtractor(
                 pooling=True, device=device, dtype=dtype)
@@ -903,7 +909,7 @@ class CaptioningRNN(nn.Module):
             self.feat_extract = FeatureExtractor(
                 pooling=False, device=device, dtype=dtype)
             self.rnn = AttentionLSTM(
-                wordvec_dim, hidden_dim, use_ln=True, dropout=0.3, device=device, dtype=dtype)
+                wordvec_dim, hidden_dim, device=device, dtype=dtype)
         else:
             raise ValueError
         nn.init.kaiming_normal_(self.affine_l.weight)
@@ -944,7 +950,8 @@ class CaptioningRNN(nn.Module):
         captions_out = captions[:, :, 1:]
         loss = 0.0
 
-        feature = self.feat_extract.extract_feature(images)  # N x 1280
+        feature = self.feat_extract.extract_feature(images)
+        feature = self.self_attention(feature)
 
         if self.cell_type == 'attention':
             # make it N * 4 * 4 * input_dim
@@ -1083,7 +1090,7 @@ def compute_bleu_score(candidate, references, max_n=3):
 def temporal_softmax_loss(
         x, y,
         ignore_index=None,
-        alpha=1,
+        alpha=0,
         val=None,
         cap_idx=None
 ):
@@ -1255,10 +1262,10 @@ def train_captioning_model(
             if verbose and j % 20 == 0:
                 if num_aug != 0:
                     print(
-                        f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']:.5f}, Loss = {bc_loss/(num_aug):.4f}")
+                        f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']:.8f}, Loss = {bc_loss/(num_aug):.4f}")
                 else:
                     print(
-                        f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']:.5f}, Loss = {bc_loss:.4f}")
+                        f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']:.8f}, Loss = {bc_loss:.4f}")
         if scheduler:
             scheduler.step()
 
