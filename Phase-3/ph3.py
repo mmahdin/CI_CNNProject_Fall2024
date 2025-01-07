@@ -821,6 +821,66 @@ class SelfAttention(nn.Module):
         return out
 
 
+class MultiHeadSelfAttention(nn.Module):
+    def __init__(self, in_channels, num_heads):
+        """
+        Multi-Head Self-Attention mechanism for feature maps.
+        Args:
+        - in_channels: Number of input channels of the feature map.
+        - num_heads: Number of attention heads.
+        """
+        super(MultiHeadSelfAttention, self).__init__()
+        self.in_channels = in_channels
+        self.num_heads = num_heads
+        self.head_dim = in_channels // num_heads
+        assert (
+            self.head_dim * num_heads == in_channels
+        ), "in_channels must be divisible by num_heads"
+
+        # Query, Key, Value projections for all heads
+        self.query = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        self.key = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        self.value = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+
+        # Output linear transformation
+        self.fc_out = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+
+        # Softmax for attention scores
+        self.softmax = nn.Softmax(dim=-1)
+
+        # Output scaling
+        self.gamma = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x):
+        """
+        Forward pass of the multi-head self-attention layer.
+        Args:
+        - x: Input feature map of shape (batch_size, in_channels, height, width)
+        Returns:
+        - out: Output feature map after multi-head self-attention
+        """
+        N, C, H, W = x.shape
+
+        query = self.query(x).view(N, self.num_heads, self.head_dim, H * W)
+        key = self.key(x).view(N, self.num_heads, self.head_dim, H * W)
+        value = self.value(x).view(N, self.num_heads, self.head_dim, H * W)
+
+        query = query.permute(0, 1, 3, 2)  # (N, num_heads, H*W, head_dim)
+        key = key.permute(0, 1, 2, 3)  # (N, num_heads, head_dim, H*W)
+        attention = torch.matmul(query, key)  # (N, num_heads, H*W, H*W)
+        attention = self.softmax(attention)
+
+        value = value.permute(0, 1, 3, 2)  # (N, num_heads, H*W, head_dim)
+        out = torch.matmul(attention, value)  # (N, num_heads, H*W, head_dim)
+
+        out = out.permute(0, 1, 3, 2).contiguous()
+        out = out.view(N, C, H, W)
+        out = self.fc_out(out)
+
+        out = self.gamma * out + x
+        return out
+
+
 def reset_seed(number):
     """
     Reset random seed to the specific number
@@ -894,7 +954,7 @@ class CaptioningRNN(nn.Module):
             nn.Dropout(p=p)  # Adding dropout with a probability of 0.5
         )
 
-        self.self_attention = SelfAttention(input_dim)
+        self.self_attention = MultiHeadSelfAttention(input_dim, 8)
 
         if cell_type == 'rnn' or cell_type == 'lstm':
             self.feat_extract = FeatureExtractor(
