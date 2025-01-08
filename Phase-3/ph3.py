@@ -1024,7 +1024,7 @@ class CaptioningRNN(nn.Module):
         if self.cell_type == 'attention':
             h0 = h0.permute(0, 3, 1, 2)  # permute back (N, H, 4, 4)
         # N x T x wordvec_dim
-        x = self.word_embed.get_embeddings(captions_in, self.token_to_idx)
+        x = self.word_embed(captions_in, self.token_to_idx)
         h = self.rnn(x, h0)  # N x T x H
         score = self.temporal_affine(h)  # N x T x V
         loss = temporal_softmax_loss(
@@ -1076,7 +1076,8 @@ class CaptioningRNN(nn.Module):
             prev_c = A.mean(dim=(2, 3))
 
         x = torch.ones((N, self.wordvec_dim), dtype=prev_h.dtype,
-                       device=prev_h.device) * self.word_embed(self._start).reshape(1, -1)
+                       device=prev_h.device) * self.word_embed(torch.tensor(self._start).view(1, -1), self.token_to_idx).reshape(1, -1)
+        print(x.shape)
         for i in range(max_length):
             next_h = None
             if self.cell_type == 'rnn':
@@ -1092,8 +1093,8 @@ class CaptioningRNN(nn.Module):
             # loss = temporal_softmax_loss(score, captions_out, ignore_index=self._null)
             max_idx = torch.argmax(score, dim=1)
             captions[:, i] = max_idx
-            x = self.word_embed(max_idx)
-            # print(x.shape)
+            x = self.word_embed(max_idx.view(1, -1), self.token_to_idx)[0]
+            print(max_idx.shape)
             prev_h = next_h
 
         if self.cell_type == 'attention':
@@ -1213,40 +1214,42 @@ def temporal_softmax_loss(
         return combined_loss, loss, bleu_reward
 
 
-class BertEmbedding:
+class BertEmbedding(nn.Module):
     def __init__(self, device, model_name='bert-base-uncased'):
         """
-        Initialize the BERT embedding class with the specified model.
+        Initialize the BERT embedding layer with the specified model.
 
         Args:
+        device (torch.device): The device on which the model will run.
         model_name (str): The name of the pre-trained BERT model to use.
         """
+        super(BertEmbedding, self).__init__()
         self.tokenizer = BertTokenizer.from_pretrained(model_name)
         self.model = BertModel.from_pretrained(model_name)
         self.model.eval()  # Set the model to evaluation mode
         self.device = device
 
-    def get_embeddings(self, captions_t, idx_to_token):
+    def forward(self, captions_t, idx_to_token):
         """
         Get BERT embeddings for a list of captions.
 
         Args:
-        captions (list of str): List of caption strings.
+        captions_t (torch.Tensor): Tensor of token indices.
+        idx_to_token (dict): Mapping from indices to tokens.
 
         Returns:
         torch.Tensor: BERT embeddings for the captions.
         """
         captions = decode_captions(captions_t, idx_to_token)
-        # Tokenize the captions
         inputs = self.tokenizer(
-            captions, return_tensors='pt', padding=True, truncation=True)
-        # Get BERT outputs (last hidden states)
+            captions, return_tensors='pt', padding=True, truncation=True
+        ).to(self.device)
+
         with torch.no_grad():
             outputs = self.model(**inputs)
 
-        # The embeddings are the last hidden states
         embeddings = outputs.last_hidden_state
-        return embeddings[:, :captions_t.shape[1], :].to(self.device)
+        return embeddings[:, :captions_t.shape[1], :]
 
 
 class WordEmbedding(nn.Module):
