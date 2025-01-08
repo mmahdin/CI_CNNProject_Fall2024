@@ -954,7 +954,7 @@ class CaptioningRNN(nn.Module):
             nn.Dropout(p=p)  # Adding dropout with a probability of 0.5
         )
 
-        self.self_attention = MultiHeadSelfAttention(input_dim, 8)
+        # self.self_attention = MultiHeadSelfAttention(input_dim, 8)
 
         if cell_type == 'rnn' or cell_type == 'lstm':
             self.feat_extract = FeatureExtractor(
@@ -1011,7 +1011,7 @@ class CaptioningRNN(nn.Module):
         loss = 0.0
 
         feature = self.feat_extract.extract_feature(images)
-        feature = self.self_attention(feature)
+        # feature = self.self_attention(feature)
 
         if self.cell_type == 'attention':
             # make it N * 4 * 4 * input_dim
