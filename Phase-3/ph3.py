@@ -26,7 +26,7 @@ from nltk.tokenize import word_tokenize
 from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
 
-N_P = 10
+N_P = 4
 
 #########################################################################
 #                           FeatureExtractor                            #
@@ -915,7 +915,7 @@ class CaptioningRNN(nn.Module):
 
     def __init__(self, word_to_idx, input_dim=512, wordvec_dim=128,
                  hidden_dim=128, cell_type='rnn', device='cpu', p=0.3,
-                 ignore_index=None, dtype=torch.float32):
+                 ignore_index=None, token_to_idx=None, dtype=torch.float32):
         """
         Construct a new CaptioningRNN instance.
         Inputs:
@@ -935,6 +935,7 @@ class CaptioningRNN(nn.Module):
         self.cell_type = cell_type
         self.word_to_idx = word_to_idx
         self.idx_to_word = {i: w for w, i in word_to_idx.items()}
+        self.token_to_idx = token_to_idx
 
         vocab_size = len(word_to_idx)
 
@@ -974,8 +975,9 @@ class CaptioningRNN(nn.Module):
             raise ValueError
         nn.init.kaiming_normal_(self.affine_l.weight)
         nn.init.zeros_(self.affine_l.bias)
-        self.word_embed = WordEmbedding(
-            vocab_size, wordvec_dim, device=device, dtype=dtype)
+        self.word_embed = BertEmbedding(device)
+        # self.word_embed = WordEmbedding(
+        #     vocab_size, wordvec_dim, device=device, dtype=dtype)
         self.temporal_affine_l = nn.Linear(
             hidden_dim, vocab_size).to(device=device, dtype=dtype)
         self.temporal_affine = nn.Sequential(
@@ -1021,7 +1023,8 @@ class CaptioningRNN(nn.Module):
 
         if self.cell_type == 'attention':
             h0 = h0.permute(0, 3, 1, 2)  # permute back (N, H, 4, 4)
-        x = self.word_embed(captions_in)  # N x T x wordvec_dim
+        # N x T x wordvec_dim
+        x = self.word_embed.get_embeddings(captions_in, self.token_to_idx)
         h = self.rnn(x, h0)  # N x T x H
         score = self.temporal_affine(h)  # N x T x V
         loss = temporal_softmax_loss(
@@ -1210,6 +1213,42 @@ def temporal_softmax_loss(
         return combined_loss, loss, bleu_reward
 
 
+class BertEmbedding:
+    def __init__(self, device, model_name='bert-base-uncased'):
+        """
+        Initialize the BERT embedding class with the specified model.
+
+        Args:
+        model_name (str): The name of the pre-trained BERT model to use.
+        """
+        self.tokenizer = BertTokenizer.from_pretrained(model_name)
+        self.model = BertModel.from_pretrained(model_name)
+        self.model.eval()  # Set the model to evaluation mode
+        self.device = device
+
+    def get_embeddings(self, captions_t, idx_to_token):
+        """
+        Get BERT embeddings for a list of captions.
+
+        Args:
+        captions (list of str): List of caption strings.
+
+        Returns:
+        torch.Tensor: BERT embeddings for the captions.
+        """
+        captions = decode_captions(captions_t, idx_to_token)
+        # Tokenize the captions
+        inputs = self.tokenizer(
+            captions, return_tensors='pt', padding=True, truncation=True)
+        # Get BERT outputs (last hidden states)
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+
+        # The embeddings are the last hidden states
+        embeddings = outputs.last_hidden_state
+        return embeddings[:, :captions_t.shape[1], :].to(self.device)
+
+
 class WordEmbedding(nn.Module):
     """
     Simplified version of torch.nn.Embedding.
@@ -1239,7 +1278,6 @@ class WordEmbedding(nn.Module):
         out = self.W_embed[x]
 
         return out
-
 
 #########################################################################
 #                                  Train                                #
@@ -1307,34 +1345,37 @@ def train_captioning_model(
                                                    j:batch_size*(j+1)].to(device=device)
             bc_loss = 0
             for ag in range(num_aug+1):
-                cap_idx = random.randint(0, captions.shape[1])-1
-                loss = rnn_decoder(
-                    images_torch[:, ag, :, :], captions, cap_idx)
-                optimizer.zero_grad()
-                loss[0].backward()
-                optimizer.step()
-                total_loss, cross_loss, bleu_reward = loss
-                bc_loss += total_loss.item()
-                epoch_loss += total_loss.item()
+                for cap_idx in range(captions.shape[1]):
+                    # cap_idx = random.randint(0, captions.shape[1])-1
+                    loss = rnn_decoder(
+                        images_torch[:, ag, :, :], captions, cap_idx)
+                    optimizer.zero_grad()
+                    loss[0].backward()
+                    optimizer.step()
+                    total_loss, cross_loss, bleu_reward = loss
+                    bc_loss += total_loss.item()
+                    epoch_loss += total_loss.item()
 
-                epoch_bleu_reward += bleu_reward
+                    epoch_bleu_reward += bleu_reward
 
             if verbose and j % 20 == 0:
                 if num_aug != 0:
                     print(
-                        f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']:.8f}, Loss = {bc_loss/(num_aug):.4f}")
+                        f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']:.8f}, Loss = {bc_loss/(num_aug*captions.shape[1]):.4f}")
                 else:
                     print(
-                        f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']:.8f}, Loss = {bc_loss:.4f}")
+                        f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']:.8f}, Loss = {bc_loss/captions.shape[1]:.4f}")
         if scheduler:
             scheduler.step()
 
         if num_aug != 0:
-            avg_loss = epoch_loss / (num_aug*num_batches)
-            epoch_bleu_reward = epoch_bleu_reward / (num_aug*num_batches)
+            avg_loss = epoch_loss / (num_aug*num_batches*captions.shape[1])
+            epoch_bleu_reward = epoch_bleu_reward / \
+                (num_aug*num_batches*captions.shape[1])
         else:
-            avg_loss = epoch_loss / (num_batches)
-            epoch_bleu_reward = epoch_bleu_reward / num_batches
+            avg_loss = epoch_loss / (num_batches*captions.shape[1])
+            epoch_bleu_reward = epoch_bleu_reward / \
+                (num_batches*captions.shape[1])
         train_loss_history.append(avg_loss)
 
         print(
