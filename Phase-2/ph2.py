@@ -5,7 +5,7 @@ import torch.optim as optim
 import matplotlib.pyplot as plt
 import random
 import torch.nn.init as init
-from sklearn.metrics import precision_score, recall_score, f1_score
+from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score
 from PIL import Image
 import pandas as pd
 import numpy as np
@@ -132,7 +132,7 @@ class ResNet(nn.Module):
 def get_augmentation_pipeline(image_size):
     return A.Compose([
         A.HorizontalFlip(p=0.8),
-        A.Rotate(limit=40, p=0.8),  # Random rotation within ±50 degrees
+        # A.Rotate(limit=40, p=0.8),  # Random rotation within ±50 degrees
         A.RandomCrop(width=int(image_size[0]*0.9),
                      height=int(image_size[1]*0.9), p=0.7),
         A.Resize(*image_size),
@@ -196,10 +196,16 @@ def calculate_metrics(loader, model, device='cpu', dtype=torch.float32):
         all_labels, all_preds, average='weighted', zero_division=0)
     recall = recall_score(all_labels, all_preds,
                           average='weighted', zero_division=0)
-
     f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
 
-    return accuracy, precision, recall, f1
+    # Calculate AUC
+    try:
+        auc = roc_auc_score(all_labels, all_preds, multi_class='ovr')
+    except ValueError as e:
+        auc = None
+        print(f"AUC could not be calculated: {e}")
+
+    return accuracy, precision, recall, f1, auc
 
 
 def check_accuracy(loader, model, device='cpu', dtype=torch.float32):
@@ -237,11 +243,11 @@ def check_accuracy(loader, model, device='cpu', dtype=torch.float32):
 
 
 def train_model(
-    model, optimizer, loader_train, loader_val,
+    model, optimizer, loader_train, loader_val, test_dataloader=None,
     device='cuda', dtype=torch.float32, epochs=1, lr=None,
     scheduler=None, learning_rate_decay=0.1, schedule=[],
     verbose=True, checkpoint_path='./models/checkpoint.pth',
-    history_path='./history/train_history.pkl', class_weights_tensor=None
+    model_path='./history/train_history.pkl', class_weights_tensor=None
 ):
     model = model.to(device)
     train_metrics_history = {
@@ -249,6 +255,9 @@ def train_model(
     }
     val_metrics_history = {
         'accuracy': [], 'precision': [], 'recall': [], 'f1': []
+    }
+    test_metrics_history = {
+        'accuracy': [], 'precision': [], 'recall': [], 'f1': [], 'auc': []
     }
     lr_history = []
     best_val_acc = 0.0
@@ -290,8 +299,8 @@ def train_model(
 
         for batch_idx, batch in enumerate(loader_train):
             x_main = batch["image"]
-            x_aug = augment_images(x_main)
-            xs = [x_main, x_aug]
+            # x_aug = augment_images(x_main)
+            xs = [x_main]
             y = batch["label"].to(device=device)
             for x in xs:
                 x = x.to(device=device, dtype=dtype)
@@ -340,7 +349,7 @@ def train_model(
               f"Precision: {train_precision:.4f}, Recall: {train_recall:.4f}, F1 Score: {train_f1:.4f}")
 
         # Validation phase
-        val_accuracy, val_precision, val_recall, val_f1 = calculate_metrics(
+        val_accuracy, val_precision, val_recall, val_f1, auc = calculate_metrics(
             loader_val, model, device=device, dtype=dtype)
         val_metrics_history['accuracy'].append(val_accuracy)
         val_metrics_history['precision'].append(val_precision)
@@ -369,6 +378,18 @@ def train_model(
         torch.save(checkpoint, checkpoint_path)
         print(f"  Checkpoint saved at epoch {epoch + 1}")
 
+        test_accuracy, test_precision, test_recall, test_f1, auc = calculate_metrics(
+            test_dataloader, model, device=device)
+        test_metrics_history['accuracy'].append(test_accuracy)
+        test_metrics_history['precision'].append(test_precision)
+        test_metrics_history['recall'].append(test_recall)
+        test_metrics_history['f1'].append(test_f1)
+        test_metrics_history['auc'].append(auc)
+        if test_dataloader != None:
+            if test_f1 >= 0.9:
+                torch.save(checkpoint, model_path)
+                print('********* 90% *********')
+
         # Print time spent for the epoch
         end_time = time.time()
         elapsed_time = end_time - start_time
@@ -376,7 +397,7 @@ def train_model(
             f"  Time spent for epoch {epoch + 1}: {elapsed_time:.2f} seconds")
 
     print("Training complete!")
-    return train_metrics_history, val_metrics_history, lr_history
+    return train_metrics_history, val_metrics_history, lr_history, test_metrics_history
 
 
 def plot_metrics(metrics_history_train, metrics_history_val, metric_name):
@@ -449,3 +470,32 @@ def initialize_weights(m):
     elif isinstance(m, nn.BatchNorm2d):
         init.constant_(m.weight, 1)
         init.constant_(m.bias, 0)
+
+
+def compute_saliency_maps(X, y, model):
+    """
+    Compute a class saliency map using the model for images X and labels y.
+
+    Input:
+    - X: Input images; Tensor of shape (N, 3, H, W)
+    - y: Labels for X; LongTensor of shape (N,)
+    - model: A pretrained CNN that will be used to compute the saliency map.
+
+    Returns:
+    - saliency: A Tensor of shape (N, H, W) giving the saliency maps for the input
+    images.
+    """
+    # Make input tensor require gradient
+    X.requires_grad_()
+
+    saliency = None
+    scores = model(X)
+    # gather only correct class
+    correct_scores = torch.gather(scores, 1, y.view(-1, 1))
+    loss = torch.sum(correct_scores)
+
+    loss.backward()
+    saliency = X.grad.data
+    saliency = torch.abs(saliency)
+    saliency, _ = torch.max(saliency, dim=1)
+    return saliency
