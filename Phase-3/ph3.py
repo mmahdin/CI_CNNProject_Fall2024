@@ -913,7 +913,8 @@ class CaptioningRNN(nn.Module):
     the `forward` method first, then come back for the `sample` method later.
     """
 
-    def __init__(self, word_to_idx, input_dim=512, wordvec_dim=128,
+    def __init__(self, word_to_idx, glove_path='./dataset/glove/embd.txt',
+                 input_dim=512, wordvec_dim=128,
                  hidden_dim=128, cell_type='rnn', device='cpu', p=0.3,
                  ignore_index=None, token_to_idx=None, dtype=torch.float32):
         """
@@ -931,7 +932,7 @@ class CaptioningRNN(nn.Module):
         super().__init__()
         if cell_type not in {'rnn', 'lstm', 'attention'}:
             raise ValueError('Invalid cell_type "%s"' % cell_type)
-
+        self.device = device
         self.cell_type = cell_type
         self.word_to_idx = word_to_idx
         self.idx_to_word = {i: w for w, i in word_to_idx.items()}
@@ -975,8 +976,12 @@ class CaptioningRNN(nn.Module):
             raise ValueError
         nn.init.kaiming_normal_(self.affine_l.weight)
         nn.init.zeros_(self.affine_l.bias)
-        self.word_embed = WordEmbedding(
-            vocab_size, wordvec_dim, device=device, dtype=dtype)
+
+        glove_embeddings = load_glove_embeddings(glove_path)
+        embedding_matrix = build_embedding_matrix(
+            word_to_idx, glove_embeddings, wordvec_dim)
+        self.word_embed = PretrainedEmbedding(embedding_matrix, device)
+
         self.temporal_affine_l = nn.Linear(
             hidden_dim, vocab_size).to(device=device, dtype=dtype)
         self.temporal_affine = nn.Sequential(
@@ -1075,7 +1080,7 @@ class CaptioningRNN(nn.Module):
             prev_c = A.mean(dim=(2, 3))
 
         x = torch.ones((N, self.wordvec_dim), dtype=prev_h.dtype,
-                       device=prev_h.device) * self.word_embed(self._start).reshape(1, -1)
+                       device=prev_h.device) * self.word_embed(torch.tensor(self._start).to('cuda')).reshape(1, -1)
         for i in range(max_length):
             next_h = None
             if self.cell_type == 'rnn':
@@ -1248,6 +1253,43 @@ class BertEmbedding(nn.Module):
 
         embeddings = outputs.last_hidden_state
         return embeddings[:, :captions_t.shape[1], :]
+
+
+# Load GloVe embeddings
+def load_glove_embeddings(glove_path):
+    embeddings = {}
+    with open(glove_path, "r", encoding="utf-8") as f:
+        for line in f:
+            values = line.split()
+            word = values[0]
+            vector = np.asarray(values[1:], dtype='float32')
+            embeddings[word] = vector
+    return embeddings
+
+# Build the embedding matrix
+
+
+def build_embedding_matrix(word_to_index, glove_embeddings, embedding_dim):
+    vocab_size = len(word_to_index)
+    embedding_matrix = np.zeros((vocab_size, embedding_dim))
+    for word, i in word_to_index.items():
+        embedding_vector = glove_embeddings.get(word)
+        if embedding_vector is not None:
+            # Words not found in GloVe will have a zero vector
+            embedding_matrix[i] = embedding_vector
+    return torch.tensor(embedding_matrix, dtype=torch.float32)
+
+
+class PretrainedEmbedding(nn.Module):
+    def __init__(self, embedding_matrix, device):
+        super(PretrainedEmbedding, self).__init__()
+        vocab_size, embedding_dim = embedding_matrix.shape
+        self.embedding = nn.Embedding(vocab_size, embedding_dim).to(device)
+        self.embedding.weight = nn.Parameter(embedding_matrix)
+        self.embedding.weight.requires_grad = False  # Freeze embedding weights
+
+    def forward(self, x):
+        return self.embedding(x)
 
 
 class WordEmbedding(nn.Module):

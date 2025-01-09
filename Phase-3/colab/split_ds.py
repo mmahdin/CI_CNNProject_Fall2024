@@ -214,3 +214,9 @@ with zipfile.ZipFile(output_zip_path, 'w') as zipf:
             print(f"Image not found: {image_file}")
 
 print(f"Selected images compressed and saved to {output_zip_path}")
+
+
+# Download latest version
+path = kagglehub.dataset_download(
+    "rtatman/glove-global-vectors-for-word-representation")
+txt = '/root/.cache/kagglehub/datasets/rtatman/glove-global-vectors-for-word-representation/versions/1/glove.6B.100d.txt'
