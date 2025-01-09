@@ -26,7 +26,7 @@ from nltk.tokenize import word_tokenize
 from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
 
-N_P = 10
+N_P = 8
 
 #########################################################################
 #                           FeatureExtractor                            #
@@ -35,14 +35,13 @@ N_P = 10
 
 class FeatureExtractor(object):
     """
-    Image feature extraction with EfficientNet.
+    Image feature extraction with ResNet101.
     """
 
     def __init__(self, pooling=False, verbose=False, device='cuda', dtype=torch.float32):
         import torch
         import torch.nn as nn
         from torchvision import transforms, models
-        from torchvision.models import EfficientNet_B0_Weights
 
         self.preprocess = transforms.Compose([
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
@@ -51,20 +50,18 @@ class FeatureExtractor(object):
         self.device, self.dtype = device, dtype
         self.pooling = pooling
 
-        # Load EfficientNet_B0 with pretrained weights
-        self.efficientnet = models.efficientnet_b0(
-            weights=EfficientNet_B0_Weights.IMAGENET1K_V1).to(device)
+        # Load ResNet101 with pretrained weights
+        self.resnet = models.resnet101(pretrained=True).to(device)
 
-        # Remove the classifier head to retain spatial features
-        self.efficientnet = nn.Sequential(
-            *list(self.efficientnet.children())[:-2])
+        # Remove the fully connected layer (classifier head) to retain spatial features
+        self.resnet = nn.Sequential(*list(self.resnet.children())[:-2])
 
         # If pooling is applied, add global average pooling
         if pooling:
-            self.efficientnet.add_module(
+            self.resnet.add_module(
                 'GlobalAvgPool', nn.AdaptiveAvgPool2d((1, 1)))
 
-        self.efficientnet.eval()
+        self.resnet.eval()
 
     def extract_feature(self, img, verbose=False):
         """
@@ -72,7 +69,7 @@ class FeatureExtractor(object):
         - img: Batch of resized images, of shape N x 3 x H x W (e.g., 224 x 224)
 
         Outputs:
-        - feat: Image feature, of shape N x 1280 (if pooling is applied) or N x 1280 x 7 x 7 (if not applied)
+        - feat: Image feature, of shape N x 2048 (if pooling is applied) or N x 2048 x 7 x 7 (if not applied)
         """
         import math
         import torch.nn.functional as F
@@ -92,14 +89,14 @@ class FeatureExtractor(object):
             process_batch = 500
             for b in range(math.ceil(num_img / process_batch)):
                 # Pass the batch through the model
-                output = self.efficientnet(
+                output = self.resnet(
                     img_prepro[b * process_batch:(b + 1) * process_batch])
                 feat.append(output)
             feat = torch.cat(feat)
 
             # If pooling is applied, flatten the output
             if self.pooling:
-                feat = feat.view(feat.size(0), -1)  # N x 1280
+                feat = feat.view(feat.size(0), -1)  # N x 2048
 
             # Add L2 normalization
             feat = F.normalize(feat.view(feat.size(0), -1),
@@ -109,6 +106,7 @@ class FeatureExtractor(object):
             print('Output feature shape: ', feat.shape)
 
         return feat
+
 
 #########################################################################
 #                                 DATA                                  #
@@ -915,7 +913,7 @@ class CaptioningRNN(nn.Module):
 
     def __init__(self, word_to_idx, glove_path='./dataset/glove/embd.txt',
                  input_dim=512, wordvec_dim=128,
-                 hidden_dim=128, cell_type='rnn', device='cpu', p=0.3,
+                 hidden_dim=128, cell_type='rnn', device='cpu', p=0.0,
                  ignore_index=None, token_to_idx=None, dtype=torch.float32):
         """
         Construct a new CaptioningRNN instance.
@@ -1080,7 +1078,7 @@ class CaptioningRNN(nn.Module):
             prev_c = A.mean(dim=(2, 3))
 
         x = torch.ones((N, self.wordvec_dim), dtype=prev_h.dtype,
-                       device=prev_h.device) * self.word_embed(torch.tensor(self._start).to('cuda')).reshape(1, -1)
+                       device=prev_h.device) * self.word_embed(torch.tensor(self._start).to(self.device)).reshape(1, -1)
         for i in range(max_length):
             next_h = None
             if self.cell_type == 'rnn':
@@ -1250,8 +1248,8 @@ class BertEmbedding(nn.Module):
 
         with torch.no_grad():
             outputs = self.model(**inputs)
+            embeddings = outputs.last_hidden_state
 
-        embeddings = outputs.last_hidden_state
         return embeddings[:, :captions_t.shape[1], :]
 
 
