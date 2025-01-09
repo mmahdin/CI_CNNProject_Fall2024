@@ -26,7 +26,7 @@ from nltk.tokenize import word_tokenize
 from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
 
-N_P = 4
+N_P = 10
 
 #########################################################################
 #                           FeatureExtractor                            #
@@ -955,7 +955,7 @@ class CaptioningRNN(nn.Module):
             nn.Dropout(p=p)  # Adding dropout with a probability of 0.5
         )
 
-        # self.self_attention = MultiHeadSelfAttention(input_dim, 8)
+        # self.self_attention = SelfAttention(input_dim)
 
         if cell_type == 'rnn' or cell_type == 'lstm':
             self.feat_extract = FeatureExtractor(
@@ -975,9 +975,8 @@ class CaptioningRNN(nn.Module):
             raise ValueError
         nn.init.kaiming_normal_(self.affine_l.weight)
         nn.init.zeros_(self.affine_l.bias)
-        self.word_embed = BertEmbedding(device)
-        # self.word_embed = WordEmbedding(
-        #     vocab_size, wordvec_dim, device=device, dtype=dtype)
+        self.word_embed = WordEmbedding(
+            vocab_size, wordvec_dim, device=device, dtype=dtype)
         self.temporal_affine_l = nn.Linear(
             hidden_dim, vocab_size).to(device=device, dtype=dtype)
         self.temporal_affine = nn.Sequential(
@@ -1024,7 +1023,7 @@ class CaptioningRNN(nn.Module):
         if self.cell_type == 'attention':
             h0 = h0.permute(0, 3, 1, 2)  # permute back (N, H, 4, 4)
         # N x T x wordvec_dim
-        x = self.word_embed(captions_in, self.token_to_idx)
+        x = self.word_embed(captions_in)
         h = self.rnn(x, h0)  # N x T x H
         score = self.temporal_affine(h)  # N x T x V
         loss = temporal_softmax_loss(
@@ -1076,8 +1075,7 @@ class CaptioningRNN(nn.Module):
             prev_c = A.mean(dim=(2, 3))
 
         x = torch.ones((N, self.wordvec_dim), dtype=prev_h.dtype,
-                       device=prev_h.device) * self.word_embed(torch.tensor(self._start).view(1, -1), self.token_to_idx).reshape(1, -1)
-        print(x.shape)
+                       device=prev_h.device) * self.word_embed(self._start).reshape(1, -1)
         for i in range(max_length):
             next_h = None
             if self.cell_type == 'rnn':
@@ -1093,8 +1091,8 @@ class CaptioningRNN(nn.Module):
             # loss = temporal_softmax_loss(score, captions_out, ignore_index=self._null)
             max_idx = torch.argmax(score, dim=1)
             captions[:, i] = max_idx
-            x = self.word_embed(max_idx.view(1, -1), self.token_to_idx)[0]
-            print(max_idx.shape)
+            x = self.word_embed(max_idx)
+            # print(x.shape)
             prev_h = next_h
 
         if self.cell_type == 'attention':
@@ -1292,7 +1290,7 @@ def train_captioning_model(
     device='cuda', dtype=torch.float32, epochs=1, batch_size=256,
     scheduler=None, val_perc=0.5, image_size=(256, 256), lr=None, weight_decay=None,
     verbose=True, checkpoint_path='./models/captioning_checkpoint.pth',
-    history_path='./history/captioning_train_history.pkl', vocab_size=None
+    history_path='./history/captioning_train_history.pkl', only_val=None
 ):
 
     total_images = len(data_dict["train_images"])
@@ -1329,27 +1327,26 @@ def train_captioning_model(
         val_loss_history = checkpoint['val_loss_history']
         best_val_loss = checkpoint['best_val_loss']
         print(f"Resumed training from epoch {start_epoch}")
+    if only_val == None:
+        for epoch in range(start_epoch, epochs):
+            print(f"Epoch {epoch + 1}/{epochs}")
+            start_time = time.time()  # Start time for epoch
 
-    for epoch in range(start_epoch, epochs):
-        print(f"Epoch {epoch + 1}/{epochs}")
-        start_time = time.time()  # Start time for epoch
-
-        # Training phase
-        rnn_decoder.train()
-        epoch_loss = 0.0
-        epoch_bleu_reward = 0
-        for j in range(num_batches):
-            images = read_images(
-                data_dict['train_images'][batch_size*j:batch_size*(j+1)], image_size)
-            num_aug = 0
-            images_torch = process_images_batch(
-                images, image_size=image_size, augment=True, num_augmented=num_aug).to(device=device, dtype=dtype)
-            captions = data_dict['train_captions'][batch_size *
-                                                   j:batch_size*(j+1)].to(device=device)
-            bc_loss = 0
-            for ag in range(num_aug+1):
-                for cap_idx in range(captions.shape[1]):
-                    # cap_idx = random.randint(0, captions.shape[1])-1
+            # Training phase
+            rnn_decoder.train()
+            epoch_loss = 0.0
+            epoch_bleu_reward = 0
+            for j in range(num_batches):
+                images = read_images(
+                    data_dict['train_images'][batch_size*j:batch_size*(j+1)], image_size)
+                num_aug = 0
+                images_torch = process_images_batch(
+                    images, image_size=image_size, augment=True, num_augmented=num_aug).to(device=device, dtype=dtype)
+                captions = data_dict['train_captions'][batch_size *
+                                                       j:batch_size*(j+1)].to(device=device)
+                bc_loss = 0
+                for ag in range(num_aug+1):
+                    cap_idx = random.randint(0, captions.shape[1])-1
                     loss = rnn_decoder(
                         images_torch[:, ag, :, :], captions, cap_idx)
                     optimizer.zero_grad()
@@ -1361,29 +1358,65 @@ def train_captioning_model(
 
                     epoch_bleu_reward += bleu_reward
 
-            if verbose and j % 20 == 0:
-                if num_aug != 0:
-                    print(
-                        f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']:.8f}, Loss = {bc_loss/(num_aug*captions.shape[1]):.4f}")
-                else:
-                    print(
-                        f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']:.8f}, Loss = {bc_loss/captions.shape[1]:.4f}")
-        if scheduler:
-            scheduler.step()
+                if verbose and j % 20 == 0:
+                    if num_aug != 0:
+                        print(
+                            f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']:.8f}, Loss = {bc_loss/(num_aug):.4f}")
+                    else:
+                        print(
+                            f"  Batch {j+1}/{num_batches}, lr = {optimizer.param_groups[0]['lr']:.8f}, Loss = {bc_loss:.4f}")
+            if scheduler:
+                scheduler.step()
 
-        if num_aug != 0:
-            avg_loss = epoch_loss / (num_aug*num_batches*captions.shape[1])
-            epoch_bleu_reward = epoch_bleu_reward / \
-                (num_aug*num_batches*captions.shape[1])
-        else:
-            avg_loss = epoch_loss / (num_batches*captions.shape[1])
-            epoch_bleu_reward = epoch_bleu_reward / \
-                (num_batches*captions.shape[1])
-        train_loss_history.append(avg_loss)
+            if num_aug != 0:
+                avg_loss = epoch_loss / (num_aug*num_batches)
+                epoch_bleu_reward = epoch_bleu_reward / \
+                    (num_aug*num_batches)
+            else:
+                avg_loss = epoch_loss / (num_batches)
+                epoch_bleu_reward = epoch_bleu_reward / \
+                    (num_batches)
+            train_loss_history.append(avg_loss)
 
-        print(
-            f"  Training Loss: {avg_loss:.4f}, BLEU Reward: {epoch_bleu_reward:.5f}")
+            print(
+                f"  Training Loss: {avg_loss:.4f}, BLEU Reward: {epoch_bleu_reward:.5f}")
 
+            # Validation phase
+            rnn_decoder.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for j in range(num_batches_val):
+                    images = read_images(
+                        data_dict['val_images'][val_batch_size * j:val_batch_size*(j+1)], image_size)
+                    images_torch = process_images_batch(
+                        images, image_size=image_size, augment=False).to(device=device, dtype=dtype)
+                    captions = data_dict['val_captions'][val_batch_size *
+                                                         j:val_batch_size*(j+1)].to(device=device)
+                    cap_idx = random.randint(0, captions.shape[1])-1
+                    loss = rnn_decoder(images_torch, captions, cap_idx, True)
+                    val_loss += loss.item()
+            avg_val_loss = val_loss / (num_batches_val)
+            val_loss_history.append(avg_val_loss)
+
+            print(f"  Validation Loss: {avg_val_loss:.4f}")
+
+            # Save checkpoint if validation loss improves
+            best_val_loss = avg_val_loss
+            checkpoint = {
+                'epoch': epoch + 1,
+                'model_state': rnn_decoder.state_dict(),
+                'optimizer_state': optimizer.state_dict(),
+                'scheduler_state': scheduler.state_dict() if scheduler else None,
+                'train_loss_history': train_loss_history,
+                'val_loss_history': val_loss_history,
+                'best_val_loss': best_val_loss
+            }
+            torch.save(checkpoint, checkpoint_path)
+
+            # Print time spent for the epoch
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+    else:
         # Validation phase
         rnn_decoder.eval()
         val_loss = 0.0
@@ -1402,23 +1435,6 @@ def train_captioning_model(
         val_loss_history.append(avg_val_loss)
 
         print(f"  Validation Loss: {avg_val_loss:.4f}")
-
-        # Save checkpoint if validation loss improves
-        best_val_loss = avg_val_loss
-        checkpoint = {
-            'epoch': epoch + 1,
-            'model_state': rnn_decoder.state_dict(),
-            'optimizer_state': optimizer.state_dict(),
-            'scheduler_state': scheduler.state_dict() if scheduler else None,
-            'train_loss_history': train_loss_history,
-            'val_loss_history': val_loss_history,
-            'best_val_loss': best_val_loss
-        }
-        torch.save(checkpoint, checkpoint_path)
-
-        # Print time spent for the epoch
-        end_time = time.time()
-        elapsed_time = end_time - start_time
 
     print("Training complete!")
     return train_loss_history, val_loss_history
