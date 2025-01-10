@@ -281,6 +281,7 @@ def train_model(
         start_epoch = checkpoint['epoch']
         train_metrics_history = checkpoint['train_history']
         val_metrics_history = checkpoint['val_history']
+        test_metrics_history = checkpoint['test_history']
         lr_history = checkpoint['lr_history']
         best_val_acc = checkpoint['best_val_acc']
         print(f"Resumed training from epoch {start_epoch}")
@@ -299,8 +300,8 @@ def train_model(
 
         for batch_idx, batch in enumerate(loader_train):
             x_main = batch["image"]
-            # x_aug = augment_images(x_main)
-            xs = [x_main]
+            x_aug = augment_images(x_main)
+            xs = [x_main, x_aug]
             y = batch["label"].to(device=device)
             for x in xs:
                 x = x.to(device=device, dtype=dtype)
@@ -372,6 +373,7 @@ def train_model(
             'scheduler_state': scheduler.state_dict() if scheduler else None,
             'train_history': train_metrics_history,
             'val_history': val_metrics_history,
+            'test_history': test_metrics_history,
             'lr_history': lr_history,
             'best_val_acc': best_val_acc
         }
