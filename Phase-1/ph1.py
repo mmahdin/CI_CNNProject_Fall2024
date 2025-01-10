@@ -5,7 +5,7 @@ import torch.optim as optim
 import matplotlib.pyplot as plt
 import random
 import torch.nn.init as init
-
+import os
 ################################################################################
 # ResNet for CIFAR-10
 ################################################################################
@@ -186,8 +186,8 @@ def check_accuracy(loader, model, device='cpu', dtype=torch.float32):
     return acc
 
 
-def train_model(model, optimizer, loader_train, loader_val,
-                device='cpu', dtype=torch.float32, epochs=1, scheduler=None,
+def train_model(model, optimizer, loader_train, loader_val, checkpoint_path=None,
+                device='cpu', dtype=torch.float32, epochs=1, scheduler=None, lr=None,
                 learning_rate_decay=0.1, schedule=[], verbose=True, model_path='./models/best.pth'):
     """
     Train a model on a dataset using the PyTorch Module API.
@@ -214,6 +214,24 @@ def train_model(model, optimizer, loader_train, loader_val,
     val_acc_history = []
     lr_history = []  # Track learning rates
     train_loss_history = []
+
+    if os.path.exists(checkpoint_path):
+        print("Resuming training from checkpoint...")
+        checkpoint = torch.load(checkpoint_path)
+        model.load_state_dict(checkpoint['model_state'])
+        optimizer.load_state_dict(checkpoint['optimizer_state'])
+        # Change the learning rate
+        if lr:
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr
+        if scheduler:
+            scheduler.load_state_dict(checkpoint['scheduler_state'])
+        start_epoch = checkpoint['epoch']
+        train_loss_history = checkpoint['train_loss_history']
+        train_acc_history = checkpoint['train_acc_history']
+        val_acc_history = checkpoint['val_acc_history']
+        lr_history = checkpoint['lr_history']
+        print(f"Resumed training from epoch {start_epoch}")
 
     for epoch in range(epochs):
         model.train()  # Set model to training mode
@@ -262,6 +280,18 @@ def train_model(model, optimizer, loader_train, loader_val,
 
         avg_loss = epoch_loss / num_batches
         train_loss_history.append(avg_loss)
+
+        checkpoint = {
+            'epoch': epoch + 1,
+            'model_state': model.state_dict(),
+            'optimizer_state': optimizer.state_dict(),
+            'scheduler_state': scheduler.state_dict() if scheduler else None,
+            'train_loss_history': train_loss_history,
+            'train_acc_history': train_acc_history,
+            'val_acc_history': val_acc_history,
+            'lr_history': lr_history
+        }
+        torch.save(checkpoint, checkpoint_path)
 
         # Adjust learning rate and record it
         if scheduler:
