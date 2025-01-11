@@ -1031,7 +1031,7 @@ class CaptioningRNN(nn.Module):
 
         return loss
 
-    def sample(self, images, max_length=15):
+    def sample(self, images, max_length=30):
         """
         Run a test-time forward pass for the model, sampling captions for input
         feature vectors.
@@ -1290,7 +1290,7 @@ def train_captioning_model(
     device='cuda', dtype=torch.float32, epochs=1, batch_size=256,
     scheduler=None, val_perc=0.5, image_size=(256, 256), lr=None, weight_decay=None,
     verbose=True, checkpoint_path='./models/captioning_checkpoint.pth',
-    history_path='./history/captioning_train_history.pkl', only_val=None
+    model_path='./model/best.pth', only_val=None
 ):
 
     total_images = len(data_dict["train_images"])
@@ -1304,7 +1304,8 @@ def train_captioning_model(
 
     train_loss_history = []
     val_loss_history = []
-    best_val_loss = float('inf')
+    # best_val_loss = float('inf')
+    best_val_loss = 27.5
     start_epoch = 0
 
     # Check if a checkpoint exists
@@ -1327,6 +1328,7 @@ def train_captioning_model(
         val_loss_history = checkpoint['val_loss_history']
         best_val_loss = checkpoint['best_val_loss']
         print(f"Resumed training from epoch {start_epoch}")
+    best_val_loss = 27.5
     if only_val == None:
         for epoch in range(start_epoch, epochs):
             print(f"Epoch {epoch + 1}/{epochs}")
@@ -1401,7 +1403,6 @@ def train_captioning_model(
             print(f"  Validation Loss: {avg_val_loss:.4f}")
 
             # Save checkpoint if validation loss improves
-            best_val_loss = avg_val_loss
             checkpoint = {
                 'epoch': epoch + 1,
                 'model_state': rnn_decoder.state_dict(),
@@ -1412,6 +1413,10 @@ def train_captioning_model(
                 'best_val_loss': best_val_loss
             }
             torch.save(checkpoint, checkpoint_path)
+
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                torch.save(checkpoint, model_path)
 
             # Print time spent for the epoch
             end_time = time.time()
