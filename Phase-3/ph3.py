@@ -26,7 +26,7 @@ from nltk.tokenize import word_tokenize
 from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
 
-N_P = 10
+N_P = 4
 
 #########################################################################
 #                           FeatureExtractor                            #
@@ -1328,7 +1328,7 @@ def train_captioning_model(
         val_loss_history = checkpoint['val_loss_history']
         best_val_loss = checkpoint['best_val_loss']
         print(f"Resumed training from epoch {start_epoch}")
-    best_val_loss = 27.5
+    best_val_loss = 33
     if only_val == None:
         for epoch in range(start_epoch, epochs):
             print(f"Epoch {epoch + 1}/{epochs}")
