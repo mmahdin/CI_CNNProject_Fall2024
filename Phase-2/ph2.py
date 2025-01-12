@@ -329,7 +329,10 @@ def train_model(
         start_epoch = checkpoint['epoch']
         train_metrics_history = checkpoint['train_history']
         val_metrics_history = checkpoint['val_history']
-        # test_metrics_history = checkpoint['test_history']
+        try:
+            test_metrics_history = checkpoint['test_history']
+        except:
+            pass
         lr_history = checkpoint['lr_history']
         best_val_acc = checkpoint['best_val_acc']
         print(f"Resumed training from epoch {start_epoch}")
