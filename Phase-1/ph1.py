@@ -182,7 +182,7 @@ def check_accuracy(loader, model, device='cpu', dtype=torch.float32):
             num_samples += preds.size(0)
     acc = float(num_correct) / num_samples
     print(
-        f'Validation accuracy: {num_correct} / {num_samples} ({100.0 * acc:.2f}%)')
+        f'Test accuracy: {num_correct} / {num_samples} ({100.0 * acc:.2f}%)')
     return acc
 
 
