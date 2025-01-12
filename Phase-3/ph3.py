@@ -26,7 +26,7 @@ from nltk.tokenize import word_tokenize
 from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
 
-N_P = 4
+N_P = 10
 
 #########################################################################
 #                           FeatureExtractor                            #
