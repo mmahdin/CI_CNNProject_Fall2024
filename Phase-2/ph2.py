@@ -14,6 +14,7 @@ import time
 import numpy as np
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
+from sklearn.metrics import roc_curve, auc
 ################################################################################
 # ResNet for CIFAR-10
 ################################################################################
@@ -208,6 +209,53 @@ def calculate_metrics(loader, model, device='cpu', dtype=torch.float32):
     return accuracy, precision, recall, f1, auc
 
 
+def calculate_metrics_and_plot_auc(loader, model, device='cpu', dtype=torch.float32):
+    model.eval()
+    all_probs = []
+    all_labels = []
+
+    with torch.no_grad():
+        for data in loader:
+            images = data['image'].to(device=device, dtype=dtype)
+            labels = data['label'].to(device=device)
+
+            outputs = model(images)
+            # Probability of the positive class
+            probs = torch.softmax(outputs, dim=1)[:, 1]
+            all_probs.extend(probs.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+    # Calculate AUC
+    fpr, tpr, thresholds = roc_curve(all_labels, all_probs)
+    auc_score = auc(fpr, tpr)
+
+    # Beautiful ROC Curve Plot
+    plt.figure(figsize=(10, 6))
+    plt.plot(fpr, tpr, color='darkorange', lw=2,
+             label=f"AUC = {auc_score:.2f}")
+    plt.plot([0, 1], [0, 1], color='navy', lw=2,
+             linestyle='--', label="Random Guess")
+
+    # Styling for a polished look
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate', fontsize=12, fontweight='bold')
+    plt.ylabel('True Positive Rate', fontsize=12, fontweight='bold')
+    plt.title('Receiver Operating Characteristic (ROC) Curve',
+              fontsize=14, fontweight='bold')
+    plt.legend(loc='lower right', fontsize=12)
+
+    # Grid and layout enhancements
+    plt.grid(visible=True, linestyle='--', linewidth=0.5)
+    plt.xticks(fontsize=10)
+    plt.yticks(fontsize=10)
+    plt.tight_layout()
+
+    plt.show()
+
+    return auc_score
+
+
 def check_accuracy(loader, model, device='cpu', dtype=torch.float32):
     """
     Check model accuracy on the given dataset loader.
@@ -281,7 +329,7 @@ def train_model(
         start_epoch = checkpoint['epoch']
         train_metrics_history = checkpoint['train_history']
         val_metrics_history = checkpoint['val_history']
-        test_metrics_history = checkpoint['test_history']
+        # test_metrics_history = checkpoint['test_history']
         lr_history = checkpoint['lr_history']
         best_val_acc = checkpoint['best_val_acc']
         print(f"Resumed training from epoch {start_epoch}")
@@ -326,10 +374,10 @@ def train_model(
             if verbose and batch_idx % 100 == 0:
                 print(
                     f"  Batch {batch_idx}, lr = {optimizer.param_groups[0]['lr']}, Loss = {loss.item():.4f}")
-        if scheduler:
-            scheduler.step()
-            current_lr = optimizer.param_groups[0]['lr']
-            lr_history.append(current_lr)
+            if scheduler:
+                scheduler.step()
+                current_lr = optimizer.param_groups[0]['lr']
+                lr_history.append(current_lr)
 
         avg_loss = epoch_loss / (len(loader_train)*2)
         train_metrics_history['loss'].append(avg_loss)
@@ -396,7 +444,7 @@ def train_model(
         end_time = time.time()
         elapsed_time = end_time - start_time
         print(
-            f"  Time spent for epoch {epoch + 1}: {elapsed_time:.2f} seconds")
+            f"  Time spent for epoch {epoch + 1}: {elapsed_time:.2f} seconds, F1: {test_f1}")
 
     print("Training complete!")
     return train_metrics_history, val_metrics_history, lr_history, test_metrics_history
